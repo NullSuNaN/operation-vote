@@ -1,0 +1,337 @@
+@using System.IO
+@using System.Text
+@using System.Threading
+@using Microsoft.AspNetCore.Components.Web
+@using operation_vote.Client
+@using operation_vote.Client.Request
+@using operation_vote.Shared
+
+@if (!_isOperational)
+{
+  <div class="connection-overlay">
+    <div class="connection-card">
+      <h2>Connect to Vote Node</h2>
+      <p>Specify the target infrastructure address below:</p>
+      
+      <div class="form-group">
+        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/" @onkeypress="HandleConnectKeyPairSubmit" />
+      </div>
+
+      @if (!string.IsNullOrEmpty(_errorMessage))
+      {
+        <div class="error-banner">
+          <strong>Error:</strong> @_errorMessage
+        </div>
+      }
+
+      @if (_isConnecting)
+      {
+        <div class="loading-steps-box">
+          <div class="step-row">
+            <span class="step-dot @(CurrentStep >= 1 ? "done" : "active")"></span>
+            <span class="step-text">Allocating network handle tasks...</span>
+          </div>
+          <div class="step-row">
+            <span class="step-dot @(CurrentStep >= 2 ? "done" : CurrentStep == 1 ? "active" : "")"></span>
+            <span class="step-text">Executing remote WebSocket handshake...</span>
+          </div>
+          <div class="step-row">
+            <span class="step-dot @(CurrentStep >= 3 ? "done" : CurrentStep == 2 ? "active" : "")"></span>
+            <span class="step-text">Parsing structural operation metrics...</span>
+          </div>
+          <div class="step-row">
+            <span class="step-dot @(CurrentStep == 4 ? "active" : "")"></span>
+            <span class="step-text">Handing off viewport keyboard traps...</span>
+          </div>
+          
+          <div class="mini-progress-track">
+            <div class="mini-progress-bar" style="width: @(CurrentStep * 25)%"></div>
+          </div>
+        </div>
+      }
+      else
+      {
+        <button class="connect-btn" @onclick="ConnectToServerAsync">
+          <span>Establish Link</span>
+        </button>
+      }
+    </div>
+  </div>
+}
+else
+{
+  <div class="voting-container" 
+     @onkeydown="HandleKeyDown" 
+     @onkeyup="HandleKeyUp" 
+     @onmousedown="HandleMouseDown"
+     @onmouseup="HandleMouseUp"
+     @ontouchstart="HandleTouchStart"
+     @ontouchend="HandleTouchEnd"
+     @oncontextmenu:preventDefault="true"
+     tabindex="0" 	
+     @ref="containerRef"
+     style="touch-action: none; user-select: none; -webkit-user-select: none; outline: none; width: 100%; height: 100vh;">
+  
+    <div class="status-card @StatusClass">
+      <h1>@StatusTitle</h1>
+      <p class="status-subtitle">@StatusMessage</p>
+      <div class="disconnect-action-zone">
+        <button class="disconnect-btn" @onclick="ManualDisconnect">Terminate Session</button>
+      </div>
+    </div>
+  </div>
+}
+
+@code {
+  private ElementReference containerRef;
+  private CancellationTokenSource? _cts;
+  private SocketRequestHandlerWS? _wsHandler;
+  private VotingClient<SocketRequestHandlerWS>? _client;
+  private Dictionary<string, Operation.OperationType> _keyOpMapping = new();
+  private HashSet<string> _pressedInputState = new(); 
+
+  private bool _isOperational = false;
+  private bool _isConnecting = false;
+  private string _errorMessage = "";
+  private int CurrentStep { get; set; } = 0;
+
+  private string ServerUri { get; set; } = "ws://192.168.1.2:9056/";
+  private string StatusTitle { get; set; } = "Initializing System";
+  private string StatusMessage = "Synchronizing operational maps...";
+  private string StatusClass = "ready";
+
+  private async Task ConnectToServerAsync()
+  {
+    if (string.IsNullOrWhiteSpace(ServerUri))
+    {
+      _errorMessage = "Target URI address field cannot be empty.";
+      return;
+    }
+
+    _isConnecting = true;
+    _errorMessage = "";
+    CurrentStep = 1;
+    StateHasChanged();
+
+    try
+    {
+      _cts = new CancellationTokenSource();
+      _wsHandler = new SocketRequestHandlerWS();
+      _client = new VotingClient<SocketRequestHandlerWS>(_wsHandler, ServerUri, _cts.Token);
+
+      _client.OnDisconnect += HandleClientDisconnect;
+
+      CurrentStep = 2;       
+      StateHasChanged();
+
+      // 1. Complete the initial connection upgrade
+      await _client.ConnectAsync();
+
+      // 2. CRITICAL FIX: Manually start the underlying background listening stream loop tasks 
+      // so the app actually processes incoming bytes sent by the server!
+      _ = _wsHandler.StartListeningAsync(_cts.Token);
+
+      CurrentStep = 3;       
+      StateHasChanged();
+      
+      // 3. Give the background streaming worker up to 3 seconds to process the server packets
+      int checkIntervals = 0;
+      while ((_client.OperationTypes == null || _client.OperationTypes.Count == 0) && checkIntervals < 60)
+      {
+          await Task.Delay(50);
+          checkIntervals++;
+      }
+
+      try 
+      {
+        ParseServerOperationalProfiles();
+      }
+      catch (Exception parseEx)
+      {
+        Console.WriteLine($"[Bypass Warning] Operational data profile mapping skipped: {parseEx.Message}");
+      }
+
+      CurrentStep = 4;       
+      StateHasChanged();
+
+      StatusTitle = "System Operational";
+      StatusMessage = "PC: Click Left/Right/Middle or press keys. Phone: Tap/Hold screen.";
+      StatusClass = "ready";
+      _isOperational = true;
+      StateHasChanged();
+
+      _ = Task.Delay(100).ContinueWith(async _ => {
+        try { await containerRef.FocusAsync(); } catch { /* no-op */ }
+      });
+    }
+    catch (Exception ex)
+    {
+      string actualFailureDetail = ex.Message;
+      
+      if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") || actualFailureDetail.Contains("ObjectDisposed"))
+      {
+          if (ex.InnerException != null)
+          {
+              actualFailureDetail = ex.InnerException.Message;
+          }
+          else if (_wsHandler != null && !_wsHandler.IsConnected)
+          {
+              actualFailureDetail = "Remote server rejected or dropped connection immediately following successful handshake.";
+          }
+          else 
+          {
+              actualFailureDetail = "Handshake synchronization timeout. No operational parameters received from host node.";
+          }
+      }
+
+      _errorMessage = $"Handshake failure: {actualFailureDetail}";
+      
+      _isConnecting = false;
+      CurrentStep = 0;
+      StateHasChanged();
+
+      await Task.Delay(200); 
+      DisconnectAndReset();
+    }
+    finally
+    {
+      _isConnecting = false;
+      CurrentStep = 0;
+      StateHasChanged();
+    }
+  }
+
+  private void HandleClientDisconnect(object? sender, (SocketRequestHandlerWS Handler, string Reason) data)
+  {
+    InvokeAsync(() => {
+      _errorMessage = $"Server disconnected connection: {data.Reason}";
+      DisconnectAndReset();
+      StateHasChanged();
+    });
+  }
+
+  private void ManualDisconnect()
+  {
+    _errorMessage = "Session manually terminated by user.";
+    DisconnectAndReset();
+  }
+
+  private void DisconnectAndReset()
+  {
+    _isOperational = false;
+    _pressedInputState.Clear();
+    _keyOpMapping.Clear();
+
+    if (_client != null)
+    {
+      _client.OnDisconnect -= HandleClientDisconnect;
+    }
+
+    try { _cts?.Cancel(); } catch { /* no-op */ }
+
+    var clientToDispose = _client;
+    var handlerToDispose = _wsHandler;
+    var ctsToDispose = _cts;
+
+    _client = null;
+    _wsHandler = null;
+    _cts = null;
+
+    try { clientToDispose?.Dispose(); } catch { /* no-op */ }
+    try { handlerToDispose?.Dispose(); } catch { /* no-op */ }
+    try { ctsToDispose?.Dispose(); } catch { /* no-op */ }
+  }
+
+  private async Task HandleConnectKeyPairSubmit(KeyboardEventArgs e)
+  {
+    if (e.Key == "Enter" && !_isConnecting)
+    {
+      await ConnectToServerAsync();
+    }
+  }
+
+  private void ParseServerOperationalProfiles()
+  {
+    if (_client == null || _client.OperationTypes == null) return;
+    var availableOpTypes = _client.OperationTypes.Values.ToList();
+    foreach (var opType in availableOpTypes)
+    {
+      if (opType?.Instructions == null || opType.Instructions.Length == 0) continue;
+      var instructionsStrings = new List<string>();
+      using var ms = new MemoryStream(opType.Instructions);
+      using var reader = new BinaryReader(ms, Encoding.UTF8);
+      if (ms.Length >= 5)
+      {
+        byte[] headerBytes = reader.ReadBytes(5);
+        if (Encoding.UTF8.GetString(headerBytes) != "keys:") ms.Position = 0;
+      }
+
+      while (ms.Position < ms.Length)
+      {
+        instructionsStrings.Add(reader.ReadString());
+      }
+
+      foreach (string key in instructionsStrings)
+      {
+        if (!string.IsNullOrEmpty(key))
+          _keyOpMapping[key] = opType;
+      }
+    }
+  }
+
+  private async Task HandleKeyDown(KeyboardEventArgs e) => await ProcessInputDownAsync(e.Key);
+  private async Task HandleKeyUp(KeyboardEventArgs e) => await ProcessInputUpAsync(e.Key);
+
+  private async Task HandleMouseDown(MouseEventArgs e)
+  {
+    string? mouseKey = ConvertButtonToKey(e.Button);
+    if (mouseKey != null) await ProcessInputDownAsync(mouseKey);
+  }
+
+  private async Task HandleMouseUp(MouseEventArgs e)
+  {
+    string? mouseKey = ConvertButtonToKey(e.Button);
+    if (mouseKey != null) await ProcessInputUpAsync(mouseKey);
+  }
+
+  private async Task HandleTouchStart(TouchEventArgs e) => await ProcessInputDownAsync("MouseLeft");
+  private async Task HandleTouchEnd(TouchEventArgs e) => await ProcessInputUpAsync("MouseLeft");
+
+  private async Task ProcessInputDownAsync(string inputKey)
+  {
+    if (_client == null || !_isOperational) return;
+    if (_keyOpMapping.TryGetValue(inputKey, out var targetedOpType) && !_pressedInputState.Contains(inputKey))
+    {
+      _pressedInputState.Add(inputKey);
+      StatusTitle = "Action Active";
+      StatusMessage = $"Holding: '{inputKey}'";
+      StatusClass = "active";
+
+      var supportOp = new Operation(targetedOpType, VoteType.Support, []);
+      await _client.SendOperationAsync(supportOp, default);
+    }
+  }
+
+  private async Task ProcessInputUpAsync(string inputKey)
+  {
+    if (_client == null || !_isOperational) return;
+    if (_keyOpMapping.TryGetValue(inputKey, out var targetedOpType) && _pressedInputState.Contains(inputKey))
+    {
+      _pressedInputState.Remove(inputKey);
+      StatusTitle = "Action Released";
+      StatusMessage = $"Released: '{inputKey}'";
+      StatusClass = "ready";
+
+      var releaseOp = new Operation(targetedOpType, VoteType.Against, []);
+      await _client.SendOperationAsync(releaseOp, default);
+    }
+  }
+
+  private string? ConvertButtonToKey(long buttonId) => buttonId switch
+  {
+    0 => "MouseLeft",
+    1 => "MouseMiddle",
+    2 => "MouseRight",
+    _ => null
+  };
+}

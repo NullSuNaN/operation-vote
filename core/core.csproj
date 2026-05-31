@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest-strict</AnalysisLevel>
+    <RootNamespace>operation_vote</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetEnv)' == 'Wasm'">
+    <OutputType>Exe</OutputType>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <DefineConstants>$(DefineConstants);BROWSER_WASM</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetEnv)' != 'Wasm'">
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+</Project>
