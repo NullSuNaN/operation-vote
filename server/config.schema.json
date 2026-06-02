@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ServerAppConfig",
+  "type": "object",
+  "required": [
+    "Network",
+    "Profiles"
+  ],
+  "properties": {
+    "Network": {
+      "type": "object",
+      "required": [
+        "TcpHost",
+        "TcpPort",
+        "WsUriPrefix"
+      ],
+      "properties": {
+        "TcpHost": {
+          "type": "string",
+          "description": "The IP address interface layout binding for the raw TCP server layer.",
+          "oneOf": [
+            {
+              "format": "ipv4"
+            },
+            {
+              "format": "ipv6"
+            }
+          ]
+        },
+        "TcpPort": {
+          "type": "integer",
+          "description": "Port number assigned for native TCP socket bindings.",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "WsUriPrefix": {
+          "type": "string",
+          "description": "URI routing prefix layout utilized for HTTP WebSocket driver matching layers.",
+          "pattern": "^https?://.+/?$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Profiles": {
+      "type": "array",
+      "description": "Collection of available operational profiles mapping user macro configurations.",
+      "items": {
+        "type": "object",
+        "required": [
+          "Name",
+          "Keys",
+          "VoteResults"
+        ],
+        "properties": {
+          "Name": {
+            "type": "string",
+            "description": "The unique identifying classification string name of the voting context macro."
+          },
+          "Keys": {
+            "type": "array",
+            "description": "Array mapping target execution input strings captured from incoming clients.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "VoteResults": {
+            "type": "array",
+            "description": "Polymorphic layout metric threshold evaluation matrix profiles mapping operational results.",
+            "items": {
+              "type": "object",
+              "allOf": [
+                {
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "PressKey",
+                        "Output"
+                      ]
+                    },
+                    "requireSupportRate": {
+                      "type": "number",
+                      "description": "Minimum floating metric percentage required to achieve condition validation state metrics.",
+                      "exclusiveMinimum": -1.0,
+                      "maximum": 1.0
+                    },
+                    "requireVoters": {
+                      "type": "integer",
+                      "description": "Threshold minimum cluster connection density parameters required to execute validation paths."
+                    },
+                    "requireSupporters": {
+                      "type": "integer",
+                      "description": "Minimum explicit supportive key pressures volume requirements."
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "PressKey"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "key"
+                    ],
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "description": "The target physical keyboard button execution target payload."
+                      }
+                    },
+                    "additionalProperties": {
+                      "properties": {
+                        "type": true,
+                        "requireSupportRate": true,
+                        "requireVoters": true,
+                        "requireSupporters": true
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "type": {
+                        "const": "Output"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "id",
+                      "fd"
+                    ],
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "description": "The specific state loop identification string passed down into low level pipelines."
+                      },
+                      "fd": {
+                        "type": "integer",
+                        "description": "The raw OS file descriptor target routing standard channels.",
+                        "minimum": 0
+                      }
+                    },
+                    "additionalProperties": {
+                      "properties": {
+                        "type": true,
+                        "requireSupportRate": true,
+                        "requireVoters": true,
+                        "requireSupporters": true
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "$schema": {
+      "type": "string",
+      "examples": [
+        "config.schema.json"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

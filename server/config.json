@@ -1,26 +1,25 @@
 {
+  "$schema": "config.schema.json",
   "Network": {
     "TcpHost": "0.0.0.0",
     "TcpPort": 9055,
-    "WsUriPrefix": "http://127.0.0.1:9056/"
+    "WsUriPrefix": "http://+:9056/"
   },
   "Profiles": [
     {
       "Name": "jump",
-      "Keys": ["w", "W", " ", "ArrowUp"],
+      "Keys": ["w", "W", " ", "ArrowUp", "MouseLeft"],
       "VoteResults": [
         {
           "type": "PressKey",
           "key": " ",
-          "requireVoters": 0,
-          "requireSupporters": 1,
           "requireSupportRate": 0.50
         },
         {
           "type": "Output",
-          "id": "notJump",
+          "id": "antiJump",
           "fd": 2,
-          "requireSupportRate": 0.50
+          "requireSupportRate": -0.2
         }
       ]
     }
