@@ -67,6 +67,8 @@ else
      @onmouseup="HandleMouseUp"
      @ontouchstart="HandleTouchStart"
      @ontouchend="HandleTouchEnd"
+     @ontouchstart:preventDefault="true"
+     @ontouchend:preventDefault="true"
      @oncontextmenu:preventDefault="true"
      tabindex="0" 	
      @ref="containerRef"
@@ -92,6 +94,7 @@ else
 
   private bool _isOperational = false;
   private bool _isConnecting = false;
+  private bool _touched = false;
   private string _errorMessage = "";
   private int CurrentStep { get; set; } = 0;
 
@@ -284,18 +287,28 @@ else
 
   private async Task HandleMouseDown(MouseEventArgs e)
   {
+    if(_touched){
+      return;
+    }
     string? mouseKey = ConvertButtonToKey(e.Button);
     if (mouseKey != null) await ProcessInputDownAsync(mouseKey);
   }
 
   private async Task HandleMouseUp(MouseEventArgs e)
   {
+    if(_touched){
+      _touched=false;
+      return;
+    }
     string? mouseKey = ConvertButtonToKey(e.Button);
     if (mouseKey != null) await ProcessInputUpAsync(mouseKey);
   }
 
-  private async Task HandleTouchStart(TouchEventArgs e) => await ProcessInputDownAsync("MouseLeft");
-  private async Task HandleTouchEnd(TouchEventArgs e) => await ProcessInputUpAsync("MouseLeft");
+  private async Task HandleTouchStart(TouchEventArgs e) {
+    _touched=true;
+    await ProcessInputDownAsync("MouseLeft");
+  }
+  private Task HandleTouchEnd(TouchEventArgs e) => ProcessInputUpAsync("MouseLeft");
 
   private async Task ProcessInputDownAsync(string inputKey)
   {

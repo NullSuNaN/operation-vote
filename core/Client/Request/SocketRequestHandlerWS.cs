@@ -144,5 +144,10 @@ namespace operation_vote.Client.Request
       _isDisposed = true;
       GC.SuppressFinalize(this);
     }
+
+    public ISocketRequestHandler Construct()
+    {
+      return new SocketRequestHandlerWS();
+    }
   }
 }

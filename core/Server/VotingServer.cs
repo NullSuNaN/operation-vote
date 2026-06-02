@@ -10,8 +10,10 @@ namespace operation_vote.Server
     private readonly List<IServerChannel> _channels = [];
     private readonly ConcurrentDictionary<Guid, IServerChannel> _clientChannelRoutingMap = new();
 
-    // Expose the configured system operation templates as a read-only list for the API consumer
     private readonly List<Operation.OperationType> _systemOperationTemplates = [];
+    /// <summary>
+    /// Expose the configured system operation templates as a read-only list for the API consumer
+    /// </summary>
     public IReadOnlyList<Operation.OperationType> SystemOperationTemplates => _systemOperationTemplates;
 
     // --- API EVENTS ---
@@ -24,7 +26,7 @@ namespace operation_vote.Server
 
     public VotingServer(IEnumerable<IServerChannel> functionalChannels, IEnumerable<Operation.OperationType> systemOperationTemplates)
     {
-      if (functionalChannels == null) throw new ArgumentNullException(nameof(functionalChannels));
+      ArgumentNullException.ThrowIfNull(functionalChannels, nameof(functionalChannels));
       _channels.AddRange(functionalChannels);
 
       // Establish standard baseline operation templates matching workspace profiles

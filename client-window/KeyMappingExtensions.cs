@@ -79,5 +79,20 @@ namespace operation_vote.Interface.ClientWindow
       // Return the direct string representation for any unmapped standard keys (e.g., "F1", "CapsLock")
       return rawKeyName;
     }
+
+    public enum MouseButton
+    {
+      MouseLeft,
+      MouseMiddle,
+      MouseRight,
+      Unknown
+    }
+    public static MouseButton GetMouseButtonName(PointerPointProperties properties)
+    {
+      if(properties.IsLeftButtonPressed) return MouseButton.MouseLeft;
+      if(properties.IsMiddleButtonPressed) return MouseButton.MouseMiddle;
+      if(properties.IsRightButtonPressed) return MouseButton.MouseRight;
+      return MouseButton.Unknown;
+    }
   }
 }

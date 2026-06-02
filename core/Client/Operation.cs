@@ -48,7 +48,6 @@ namespace operation_vote.Client
 
       writer.Write(Type.Id);
 
-      writer.Write(Id);
       writer.Write((byte)VoteType);
       writer.Write(StateBytes.Length);
       writer.Write(StateBytes);

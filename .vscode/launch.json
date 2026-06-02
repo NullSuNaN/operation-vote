@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": ".NET client-window Launch (console)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "dotnet: build client-window.csproj",
+      "program": "${workspaceFolder}/client-window/bin/Debug/net10.0/client-window.dll",
+      "args": [
+        "172.17.80.1:9055",
+        "false"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "console": "internalConsole"
+    }
+  ]
+}

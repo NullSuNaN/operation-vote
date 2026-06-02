@@ -20,16 +20,14 @@ namespace operation_vote.Server
     }
 
     public OperationType Type { get; }
-    public long Id { get; }
     public VoteType VoteType { get; }
     public byte[] StateBytes { get; set; }
 
-    public Operation(OperationType type, VoteType voteType, byte[] stateBytes, long id)
+    public Operation(OperationType type, VoteType voteType, byte[] stateBytes)
     {
       Type = type ?? throw new ArgumentNullException(nameof(type));
       VoteType = voteType;
       StateBytes = stateBytes ?? throw new ArgumentNullException(nameof(stateBytes));
-      Id = id;
     }
 
     /// <summary>
@@ -42,16 +40,18 @@ namespace operation_vote.Server
 
       // 1. Read the inner OperationType structural components
       long typeId = reader.ReadInt64();
-      if(opList.Count <= typeId) return null;
-      var type = opList.ElementAt((Index)(int)typeId);
+      if(typeId <= 0 || typeId > opList.Count)
+      {
+        return null;
+      }
+      var type = opList.ElementAt((Index)(int)(typeId-1));
 
       // 2. Read the state context fields matching client serialization layout
-      long operationId = reader.ReadInt64();
       VoteType voteType = (VoteType)reader.ReadByte();
       int stateLength = reader.ReadInt32();
       byte[] stateBytes = reader.ReadBytes(stateLength);
 
-      return new Operation(type, voteType, stateBytes, operationId);
+      return new Operation(type, voteType, stateBytes);
     }
 
     /// <summary>
@@ -63,12 +63,9 @@ namespace operation_vote.Server
       using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
       // 1. Write the Type parameters
-      writer.Write(Type.Instructions.Length);
-      writer.Write(Type.Instructions);
       writer.Write(Type.Id);
 
       // 2. Write the structural instance metadata (Fixing the client alignment mismatch)
-      writer.Write(Id);
       writer.Write((byte)VoteType);
       writer.Write(StateBytes.Length);
       writer.Write(StateBytes);

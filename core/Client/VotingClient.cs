@@ -18,6 +18,8 @@ namespace operation_vote.Client
         private const int RECONNECT_LIMIT = 3;
         private int _reconnectAttempts;
         private bool _isDisposed;
+		public bool Disconnected => _isDisposed;
+
 
         // Tracks the multi-step initialization handshake frame asynchronously
         private TaskCompletionSource<bool>? _handshakeCompletionSource;

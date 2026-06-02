@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 using operation_vote.Server;
 using operation_vote.Server.Network;
 
@@ -35,22 +36,22 @@ namespace operation_vote.Interface.Server
       if (!File.Exists(configPath))
       {
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"[Fatal Error] Configuration layout target missing at: {configPath}");
+        ServerLogger.logger.LogInformation(()=>$"[Fatal Error] Configuration layout target missing at: {configPath}");
         Console.ResetColor();
         return;
       }
 
       try
       {
-        Console.WriteLine("=== INITIALIZING MULTI-PROTOCOL HYBRID VOTING ENGINE ===");
-        Console.WriteLine($"Loading configuration rules from: {configPath}");
+        ServerLogger.logger.LogInformation(()=>"=== INITIALIZING MULTI-PROTOCOL HYBRID VOTING ENGINE ===");
+        ServerLogger.logger.LogInformation(()=>$"Loading configuration rules from: {configPath}");
 
         string jsonText = await File.ReadAllTextAsync(configPath);
         var config = JsonSerializer.Deserialize<ServerAppConfig>(jsonText);
 
         if (config == null || config.Network == null || config.Profiles == null)
         {
-          Console.WriteLine("[Error] Serialization failed: Root metadata target fields are null.");
+          ServerLogger.logger.LogInformation(()=>"[Error] Serialization failed: Root metadata target fields are null.");
           return;
         }
 
@@ -59,10 +60,10 @@ namespace operation_vote.Interface.Server
       catch (Exception ex)
       {
         Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine($"[Fatal System Crash] Runtime config parse failure: {ex.Message}");
+        ServerLogger.logger.LogInformation(()=>$"[Fatal System Crash] Runtime config parse failure: {ex.Message}");
         if (ex.InnerException != null)
         {
-          Console.WriteLine($"Details: {ex.InnerException.Message}");
+          ServerLogger.logger.LogInformation(()=>$"Details: {ex.InnerException.Message}");
         }
         Console.ResetColor();
       }
@@ -94,7 +95,7 @@ namespace operation_vote.Interface.Server
         }
 
         // Ensure trailing slash is present for the underlying engine matching rules
-        if (!sanitizedWsPrefix.EndsWith("/"))
+        if (!sanitizedWsPrefix.EndsWith('/'))
         {
           sanitizedWsPrefix += "/";
         }
@@ -122,14 +123,14 @@ namespace operation_vote.Interface.Server
         operationalSuite.Add(newType);
         profileMapping[targetId] = profile;
 
-        Console.WriteLine($"[Configured Profile] {profile.Name} bound to key hooks: [{string.Join(", ", profile.Keys)}]");
+        ServerLogger.logger.LogInformation(()=>$"[Configured Profile] {profile.Name} bound to key hooks: [{string.Join(", ", profile.Keys)}]");
       }
 
       var server = new VotingServer(transportCluster, operationalSuite);
 
-      server.OnClientConnected += (sender, clientId) => Console.WriteLine($"[Cluster Joined] Client ID: {clientId}");
-      server.OnClientHandshakeCompleted += (sender, clientId) => Console.WriteLine($"[Handshake Verified] Client {clientId} initialized successfully.");
-      server.OnClientDisconnected += (sender, e) => Console.WriteLine($"[Cluster Left] Client ID: {e.ClientId}. Reason: {e.Reason}");
+      server.OnClientConnected += (sender, clientId) => ServerLogger.logger.LogDebug(()=>$"[Cluster Joined] Client ID: {clientId}");
+      server.OnClientHandshakeCompleted += (sender, clientId) => ServerLogger.logger.LogDebug(()=>$"[Handshake Verified] Client {clientId} initialized successfully.");
+      server.OnClientDisconnected += (sender, e) => ServerLogger.logger.LogDebug(()=>$"[Cluster Left] Client ID: {e.ClientId}. Reason: {e.Reason}");
 
       var voteManager = new VotingManager(server);
       voteManager.OnOperationCountChanged += (sender, data) =>
@@ -149,14 +150,14 @@ namespace operation_vote.Interface.Server
       Console.ForegroundColor = ConsoleColor.Cyan;
       Console.WriteLine($"\nServer active. Hosting TCP ({config.Network.TcpPort}) and WebSockets ({sanitizedWsPrefix}) layers...");
       Console.ResetColor();
-      Console.WriteLine("Press [ENTER] to shut down the server gracefully...\n");
+      Console.WriteLine("Press [ENTER] to shut down the server...\n");
       Console.ReadLine();
 
       Console.WriteLine("Broadcasting closing frames and wrapping up operations...");
       await server.BroadcastShutdownSignalAsync();
       server.Stop();
       await serverTask;
-      Console.WriteLine("Server shutdown completed smoothly.");
+      Console.WriteLine("Server is closed.");
     }
 
     private static byte[] PackKeysToBinary(string[] instructions)
