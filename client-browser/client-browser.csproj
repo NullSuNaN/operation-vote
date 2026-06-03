@@ -8,6 +8,7 @@
     <AnalysisLevel>latest-strict</AnalysisLevel>
     <RootNamespace>operation_vote.Interface.ClientBrowser</RootNamespace>
     <BlazorCacheBootResources>false</BlazorCacheBootResources>
+    <RuntimeIdentifiers>browser-wasm</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

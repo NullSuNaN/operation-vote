@@ -8,6 +8,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AnalysisLevel>latest-strict</AnalysisLevel>
     <RootNamespace>operation_vote.Interface.ClientWindow</RootNamespace>
+    <RuntimeIdentifiers>win-x86;win-x64;linux-arm;linux-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

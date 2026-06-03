@@ -8,16 +8,6 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AnalysisLevel>latest-strict</AnalysisLevel>
     <RootNamespace>operation_vote</RootNamespace>
+    <RuntimeIdentifiers>win-x86;win-x64;linux-arm;linux-x64;browser-wasm</RuntimeIdentifiers>
   </PropertyGroup>
-
-  <PropertyGroup Condition="'$(TargetEnv)' == 'Wasm'">
-    <OutputType>Exe</OutputType>
-    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
-    <DefineConstants>$(DefineConstants);BROWSER_WASM</DefineConstants>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(TargetEnv)' != 'Wasm'">
-    <OutputType>Exe</OutputType>
-  </PropertyGroup>
-
 </Project>
