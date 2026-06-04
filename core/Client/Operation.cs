@@ -1,64 +1,97 @@
+using System;
+using System.IO;
 using System.Text;
+using System.Threading;
 using operation_vote.Shared;
 
 namespace operation_vote.Client
 {
-  /// <summary>
-  /// A Operation.
-  /// There can be multiple operations with the same type.
-  /// </summary>
-  public class Operation(Operation.OperationType type, VoteType VoteType, byte[] stateBytes) : IDisposable
+  public class Operation : IDisposable
   {
     public class OperationType
     {
       public readonly VotingEnv Env;
       public readonly long Id;
-      /// <summary>
-      /// tells the external program what does the operation do.
-      /// </summary>
       public readonly byte[] Instructions;
 
-      /// <summary>
-      /// You should not create a operation type by your own, this is created by the server.
-      /// </summary>
-      /// <param name="id">the id sent from the server</param>
-      /// <param name="env">the environment</param>
       internal OperationType(byte[] instructions, long id, VotingEnv env)
       {
-        Instructions=instructions;
+        Instructions = instructions;
         Id = id;
         Env = env;
       }
     }
 
-    public readonly OperationType Type = type;
-    public readonly long Id = type.Env.NewId;
-    public byte[] StateBytes { get; set; } = stateBytes;
-    public readonly VoteType VoteType = VoteType;
-    private bool _isDisposed;
-    public bool IsDisposed => _isDisposed;
+    public readonly OperationType Type;
+    public readonly long Id;
+    public readonly VoteType VoteType;
 
-    /// <summary>
-    /// Serializes the entire Operation object into a flexible byte array payload.
-    /// </summary>
+    private byte[] _stateBytes;
+    private int _isDisposedState; // 0 = false, 1 = true
+    private readonly ReaderWriterLockSlim _stateLock = new();
+
+    public bool IsDisposed => Volatile.Read(ref _isDisposedState) == 1;
+
+    public byte[] StateBytes
+    {
+      get
+      {
+        _stateLock.EnterReadLock();
+        try
+        {
+          // Return a copy to ensure safe processing across separate thread tasks
+          return (byte[])_stateBytes.Clone();
+        }
+        finally
+        {
+          _stateLock.ExitReadLock();
+        }
+      }
+      set
+      {
+        _stateLock.EnterWriteLock();
+        try
+        {
+          _stateBytes = value ?? throw new ArgumentNullException(nameof(value));
+        }
+        finally
+        {
+          _stateLock.ExitWriteLock();
+        }
+      }
+    }
+
+    public Operation(Operation.OperationType type, VoteType voteType, byte[] stateBytes)
+    {
+      Type = type ?? throw new ArgumentNullException(nameof(type));
+      Id = type.Env.NewId;
+      VoteType = voteType;
+      _stateBytes = stateBytes ?? throw new ArgumentNullException(nameof(stateBytes));
+    }
+
     public byte[] ToByteArray()
     {
       using var ms = new MemoryStream();
       using var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
 
       writer.Write(Type.Id);
-
       writer.Write((byte)VoteType);
-      writer.Write(StateBytes.Length);
-      writer.Write(StateBytes);
+
+      _stateLock.EnterReadLock();
+      try
+      {
+        writer.Write(_stateBytes.Length);
+        writer.Write(_stateBytes);
+      }
+      finally
+      {
+        _stateLock.ExitReadLock();
+      }
 
       writer.Flush();
       return ms.ToArray();
     }
 
-    /// <summary>
-    /// Implements IDisposable cleanup rules.
-    /// </summary>
     public void Dispose()
     {
       Dispose(true);
@@ -67,14 +100,21 @@ namespace operation_vote.Client
 
     protected virtual void Dispose(bool disposing)
     {
-      if (!_isDisposed)
+      if (Interlocked.Exchange(ref _isDisposedState, 1) == 0)
       {
         if (disposing)
         {
-          // Clear references or arrays to help out the Garbage Collector
-          StateBytes = [];
+          _stateLock.EnterWriteLock();
+          try
+          {
+            _stateBytes = [];
+          }
+          finally
+          {
+            _stateLock.ExitWriteLock();
+          }
+          _stateLock.Dispose();
         }
-        _isDisposed = true;
       }
     }
   }

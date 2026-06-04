@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
@@ -23,7 +24,7 @@ namespace operation_vote.Interface.ClientWindow
 		private readonly CancellationTokenSource PressToCloseCts = new();
 		private bool _readyToForceClose = false;
 
-		public VotingWindow(VotingClient<T> client, Dictionary<string, Operation.OperationType> keyOp)
+		public VotingWindow(VotingClient<T> client, ConcurrentDictionary<string, Operation.OperationType> keyOp, Action trackActivity)
 		{
 			Title = "Operation Voting Client";
 			Width = 400;
@@ -61,6 +62,7 @@ namespace operation_vote.Interface.ClientWindow
 					return;
 				}
 
+				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
 				if (keyOp.TryGetValue(keyStr, out var targetedOpType) && !_pressedKeysState.ContainsKey(key))
@@ -84,6 +86,7 @@ namespace operation_vote.Interface.ClientWindow
 			KeyUp += async (sender, e) =>
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
+				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
 				if (keyOp.TryGetValue(keyStr, out var targetedOpType) && _pressedKeysState.ContainsKey(key))
@@ -106,6 +109,7 @@ namespace operation_vote.Interface.ClientWindow
 			PointerPressed += async (sender, e) =>
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
+				trackActivity();
 				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
 				if (keyOp.TryGetValue(button.ToString(), out var targetedOpType) && !_pressedMouseButtonState.Contains(button))
 				{
@@ -127,6 +131,7 @@ namespace operation_vote.Interface.ClientWindow
 			PointerReleased += async (sender, e) =>
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
+				trackActivity();
 				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
 				if (keyOp.TryGetValue(button.ToString(), out var targetedOpType) && !_pressedMouseButtonState.Contains(button))
 				{

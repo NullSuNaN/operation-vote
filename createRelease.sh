@@ -28,11 +28,16 @@ mkfifo "$dict/error.fifo"
 exec 5>&-
 exec 5<> "$dict/error.fifo"
 rm "$dict/error.fifo"
+mkfifo "$dict/clientBrowserLock.fifo"
+exec 6>&-
+exec 6<> "$dict/clientBrowserLock.fifo"
+rm "$dict/clientBrowserLock.fifo"
 IFS=''
 for((i=0;i<thread_limit;i++)); do
   echo -n " " >&3
 done
 echo -n " " >&4
+echo -n " " >&6
 
 err() {
   read -r -N 1 <&4
@@ -58,7 +63,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         dotnet publish -r "$system" --output "$dict_proj/bin" -p:Version="$ver" -- "$proj_type" || err "Failed to build $proj_type-$system"$'\n'
         [ "${system%%-*}" == win ] && echo $'@echo off\nbin\\'"$proj_type"$'.exe %*\npause' > "$dict_proj/$proj_type.bat"
         [ "${system%%-*}" == linux ] && {
-          echo 'bin/$proj_type "$@"' > "$dict_proj/$proj_type"
+          echo 'bin/'"$proj_type"' "$@"' > "$dict_proj/$proj_type"
           chmod +x "$dict_proj/$proj_type"
         }
         cp $proj_type/config.json "$dict_proj/"
@@ -66,7 +71,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         trap 'echo -n " " >&3' SIGINT
         cd "$dict"
         zip "$proj_type-$system.zip" -q9r "$proj_type-$system/"
-        rm -rf "./$proj_type-$system"
+        # rm -rf "./$proj_type-$system"
       } 2>&1
     )"
     read -r -N 1 <&4
@@ -88,13 +93,13 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         dotnet publish -r "$system" --output "$dict_proj/bin" -p:Version="$ver" -- "$proj_type" || err "Failed to build $proj_type-$system"$'\n'
         [ "${system%%-*}" == win ] && echo $'@echo off\nbin\\'"$proj_type"$'.exe %*\npause' > "$dict_proj/$proj_type.bat"
         [ "${system%%-*}" == linux ] && {
-          echo 'bin/$proj_type "$@"' > "$dict_proj/$proj_type"
+          echo 'bin/'"$proj_type"' "$@"' > "$dict_proj/$proj_type"
           chmod +x "$dict_proj/$proj_type"
         }
         trap 'echo -n " " >&3' SIGINT
         cd "$dict"
         zip "$proj_type-$system.zip" -q9r "$proj_type-$system/"
-        rm -rf "./$proj_type-$system"
+        # rm -rf "./$proj_type-$system"
       } 2>&1
     )"
     read -r -N 1 <&4
@@ -105,6 +110,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
   { # client-browser
     trap 'echo -n " " >&3;exit 130' SIGINT
     read -r -N 1 <&3
+    read -r -N 1 <&6
     proj_type=client-browser
     dict_proj="$dict/$proj_type-$system"
     echo "Building $proj_type-$system"
@@ -127,9 +133,10 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         trap 'echo -n " " >&3' SIGINT
         cd "$dict"
         zip "$proj_type-$system.zip" -q9r "$proj_type-$system/"
-        rm -rf "./$proj_type-$system"
+        # rm -rf "./$proj_type-$system"
       } 2>&1
     )"
+    echo -n " " >&6
     read -r -N 1 <&4
     echo "$output"
     echo -n " " >&4
@@ -138,10 +145,13 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
 done
 failed=0
 while true;do
-  [ "$(jobs -pr)" == '' ] && exit
+  [ "$(jobs -pr)" == '' ] && {
+    echo $'\e[34mRelease is fully created.\e[0m'
+    exit
+  }
   read -r -N 1 <&4
   read -r -d $'\0' -t 0.5 err <&5 && {
-    echo -n "$err"
+    echo -n $'\e[31m'"$err"$'\e[0m'
     echo 'Press Enter to abort building.'
     failed=1
   }

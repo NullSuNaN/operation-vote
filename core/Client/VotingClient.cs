@@ -5,310 +5,314 @@ using operation_vote.Client.Request;
 
 namespace operation_vote.Client
 {
-    public class VotingClient<T> : IDisposable where T : ISocketRequestHandler
-    {
-        public readonly T SocketRequestHandler;
-        private string targetURI;
-        private readonly ConcurrentDictionary<long, Operation> _pendingOperations = new();
-        private readonly SemaphoreSlim _connectionLock = new(1, 1);
+	public class VotingClient<T> : IDisposable where T : ISocketRequestHandler
+	{
+		public readonly T SocketRequestHandler;
+		private string _targetURI;
+		private readonly ConcurrentDictionary<long, Operation> _pendingOperations = new();
+		private readonly SemaphoreSlim _connectionLock = new(1, 1);
 
-        // Local storage for parsed Operation Types initialized during connection handshake
-        private readonly ConcurrentDictionary<long, Operation.OperationType> _operationTypes = new();
+		// Local storage for parsed Operation Types initialized during connection handshake
+		private readonly ConcurrentDictionary<long, Operation.OperationType> _operationTypes = new();
 
-        private const int RECONNECT_LIMIT = 3;
-        private int _reconnectAttempts;
-        private bool _isDisposed;
-		public bool Disconnected => _isDisposed;
+		private const int RECONNECT_LIMIT = 3;
+		private int _reconnectAttempts;
+		private int _isDisposedState; // 0 = false, 1 = true for atomic thread-safety
+		public bool Disconnected => Volatile.Read(ref _isDisposedState) == 1;
 
+		// Tracks the multi-step initialization handshake frame asynchronously
+		private TaskCompletionSource<bool>? _handshakeCompletionSource;
 
-        // Tracks the multi-step initialization handshake frame asynchronously
-        private TaskCompletionSource<bool>? _handshakeCompletionSource;
+		public string TargetURI
+		{
+			get
+			{
+				lock (_uriLock) return _targetURI;
+			}
+			set
+			{
+				lock (_uriLock)
+				{
+					if (_targetURI == value) return;
+					_targetURI = value;
+				}
+				// Fire-and-forget safely monitored background task
+				_ = Task.Run(() => ReconnectLoopAsync());
+			}
+		}
+		private readonly Lock _uriLock = new();
 
-        public string TargetURI
-        {
-            get => targetURI;
-            set
-            {
-                targetURI = value;
-                _ = ReconnectLoopAsync();
-            }
-        }
+		public readonly CancellationToken CancellationToken;
+		public readonly VotingEnv Env = new();
+		public ReadOnlyDictionary<long, Operation.OperationType> OperationTypes => _operationTypes.AsReadOnly();
 
-        public readonly CancellationToken CancellationToken;
-        public readonly VotingEnv Env = new();
-        public ReadOnlyDictionary<long, Operation.OperationType> OperationTypes => _operationTypes.AsReadOnly();
+		public event EventHandler<(T, string)>? OnDisconnect;
 
-        public event EventHandler<(T, string)>? OnDisconnect;
+		public VotingClient(T socketRequestHandler, string uri, CancellationToken token = default)
+		{
+			SocketRequestHandler = socketRequestHandler ?? throw new ArgumentNullException(nameof(socketRequestHandler));
+			_targetURI = uri ?? throw new ArgumentNullException(nameof(uri));
+			CancellationToken = token;
 
-        public VotingClient(T socketRequestHandler, string uri, CancellationToken token = default)
-        {
-            SocketRequestHandler = socketRequestHandler;
-            targetURI = new string(uri);
-            CancellationToken = token;
+			SocketRequestHandler.OnDataReceived += HandleIncomingData;
+			SocketRequestHandler.OnDisconnected += HandleSocketDisconnection;
+		}
 
-            SocketRequestHandler.OnDataReceived += HandleIncomingData;
-            SocketRequestHandler.OnDisconnected += HandleSocketDisconnection;
-        }
+		public async Task ConnectAsync()
+		{
+			if (Disconnected) return;
 
-        /// <summary>
-        /// Explicitly triggers connection and performs the structured initialization sequence:
-        /// 1. Sends (bit 1)'INIT'
-        /// 2. Validates version protocol strings ('VOTE-1.1')
-        /// 3. Registers system-wide operation types matching the runtime payload arrays
-        /// </summary>
-        public async Task ConnectAsync()
-        {
-            if (_isDisposed) return;
+			await _connectionLock.WaitAsync(CancellationToken).ConfigureAwait(false);
+			try
+			{
+				if (Disconnected) return;
 
-            await _connectionLock.WaitAsync();
-            try
-            {
-                _handshakeCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+				_handshakeCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-                string cleanUri = targetURI.TrimStart('+');
-                await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken);
+				string cleanUri;
+				lock (_uriLock) { cleanUri = _targetURI.TrimStart('+'); }
 
-                // Reset reconnect counts on fresh structural initiation
-                _reconnectAttempts = 0;
+				await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken).ConfigureAwait(false);
 
-                // Start inbound listener processing pathway
-                _ = SocketRequestHandler.StartListeningAsync(CancellationToken);
+				Interlocked.Exchange(ref _reconnectAttempts, 0);
 
-                // --- STEP 1: Pack and transmit Bit 1 + 'INIT' Handshake Frame ---
-                byte[] initTextBytes = Encoding.UTF8.GetBytes("INIT");
-                byte[] initPacket = PackBitStream(startingBit: 1, initTextBytes);
-                await SocketRequestHandler.SendAsync(initPacket, CancellationToken);
+				// Start inbound listener processing pathway
+				_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
 
-                // Wait for the server data arrival to execute version checks and structural allocations
-                bool initialized = await _handshakeCompletionSource.Task;
-                if (!initialized)
-                {
-                    await SocketRequestHandler.DisconnectAsync(CancellationToken);
-                    OnDisconnect?.Invoke(this, (SocketRequestHandler, "Failed to initialize the connection."));
-                    Dispose();
-                }
-            }
-            catch
-            {
-                _handshakeCompletionSource?.TrySetResult(false);
-                throw;
-            }
-            finally
-            {
-                _connectionLock.Release();
-            }
-        }
+				// --- STEP 1: Pack and transmit Bit 1 + 'INIT' Handshake Frame ---
+				byte[] initTextBytes = Encoding.UTF8.GetBytes("INIT");
+				byte[] initPacket = PackBitStream(1, initTextBytes);
+				await SocketRequestHandler.SendAsync(initPacket, CancellationToken).ConfigureAwait(false);
 
-        public async Task SendOperationAsync(Operation operation, CancellationToken token = default)
-        {
-            if (_isDisposed || operation.IsDisposed) return;
+				// Wait for the server data arrival to execute version checks
+				bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
+				if (!initialized)
+				{
+					await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
+					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Failed to initialize the connection."));
+					Dispose();
+				}
+			}
+			catch
+			{
+				_handshakeCompletionSource?.TrySetResult(false);
+				throw;
+			}
+			finally
+			{
+				_connectionLock.Release();
+			}
+		}
 
-            _pendingOperations[operation.Id] = operation;
+		public async Task SendOperationAsync(Operation operation, CancellationToken token = default)
+		{
+			if (Disconnected || operation.IsDisposed) return;
 
-            byte[] rawOperationBytes = operation.ToByteArray();
-            byte[] fullPacket = PackBitStream(startingBit: 0, rawOperationBytes);
+			_pendingOperations[operation.Id] = operation;
 
-            await SocketRequestHandler.SendAsync(fullPacket, token);
-        }
+			byte[] rawOperationBytes = operation.ToByteArray();
+			byte[] fullPacket = PackBitStream(0, rawOperationBytes);
 
-        private async Task ReconnectLoopAsync()
-        {
-            if (_isDisposed) return;
+			await SocketRequestHandler.SendAsync(fullPacket, token).ConfigureAwait(false);
+		}
 
-            await _connectionLock.WaitAsync();
-            try
-            {
-                if (SocketRequestHandler.IsConnected)
-                {
-                    await SocketRequestHandler.DisconnectAsync(CancellationToken);
-                }
+		private async Task ReconnectLoopAsync()
+		{
+			if (Disconnected) return;
 
-                string cleanUri = targetURI.TrimStart('+');
-                await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken);
+			// Prevent simultaneous execution of connection lifecycle logic across parallel threads
+			await _connectionLock.WaitAsync(CancellationToken).ConfigureAwait(false);
+			try
+			{
+				if (Disconnected) return;
 
-                _reconnectAttempts = 0;
+				if (SocketRequestHandler.IsConnected)
+				{
+					await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
+				}
 
-                // 1. Replay cached non-disposed operations
-                foreach (var pair in _pendingOperations)
-                {
-                    if (pair.Value.IsDisposed)
-                    {
-                        _pendingOperations.TryRemove(pair.Key, out _);
-                        continue;
-                    }
+				string cleanUri;
+				lock (_uriLock) { cleanUri = _targetURI.TrimStart('+'); }
 
-                    byte[] rawOpBytes = pair.Value.ToByteArray();
-                    byte[] replayPacket = PackBitStream(startingBit: 0, rawOpBytes);
+				await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken).ConfigureAwait(false);
 
-                    await SocketRequestHandler.SendAsync(replayPacket, CancellationToken);
-                }
+				Interlocked.Exchange(ref _reconnectAttempts, 0);
 
-                // 2. Re-send Handshake registration
-                byte[] regCmdBytes = Encoding.UTF8.GetBytes("REG");
-                byte[] registrationPacket = PackBitStream(startingBit: 1, regCmdBytes);
+				// 1. Replay cached non-disposed operations safely across thread modifications
+				foreach (var pair in _pendingOperations)
+				{
+					if (pair.Value.IsDisposed)
+					{
+						_pendingOperations.TryRemove(pair.Key, out _);
+						continue;
+					}
 
-                await SocketRequestHandler.SendAsync(registrationPacket, CancellationToken);
+					byte[] rawOpBytes = pair.Value.ToByteArray();
+					byte[] replayPacket = PackBitStream(0, rawOpBytes);
 
-                _ = SocketRequestHandler.StartListeningAsync(CancellationToken);
-            }
-            catch
-            {
-                _reconnectAttempts++;
-                if (_reconnectAttempts >= RECONNECT_LIMIT)
-                {
-                    OnDisconnect?.Invoke(this, (SocketRequestHandler, "Connection is interrupted."));
-                    Dispose();
-                }
-            }
-            finally
-            {
-                _connectionLock.Release();
-            }
-        }
+					await SocketRequestHandler.SendAsync(replayPacket, CancellationToken).ConfigureAwait(false);
+				}
 
-        private static byte[] PackBitStream(byte startingBit, byte[] data)
-        {
-            int totalBits = 1 + (data.Length * 8);
-            int totalBytes = (totalBits + 7) / 8;
-            byte[] output = new byte[totalBytes];
+				// 2. Re-send Handshake registration
+				byte[] regCmdBytes = Encoding.UTF8.GetBytes("REG");
+				byte[] registrationPacket = PackBitStream(1, regCmdBytes);
 
-            if (startingBit == 1)
-            {
-                output[0] |= 0x80;
-            }
+				await SocketRequestHandler.SendAsync(registrationPacket, CancellationToken).ConfigureAwait(false);
 
-            for (int i = 0; i < data.Length; i++)
-            {
-                int bitIndex = 1 + (i * 8);
-                int byteOffset = bitIndex / 8;
-                int shiftOffset = bitIndex % 8;
+				_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
+			}
+			catch
+			{
+				if (Interlocked.Increment(ref _reconnectAttempts) >= RECONNECT_LIMIT)
+				{
+					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Connection is interrupted."));
+					Dispose();
+				}
+			}
+			finally
+			{
+				_connectionLock.Release();
+			}
+		}
 
-                output[byteOffset] |= (byte)(data[i] >> shiftOffset);
-                
-                if (byteOffset + 1 < output.Length)
-                {
-                    output[byteOffset + 1] |= (byte)(data[i] << (8 - shiftOffset));
-                }
-            }
+		private static byte[] PackBitStream(byte startingBit, byte[] data)
+		{
+			int totalBits = 1 + (data.Length * 8);
+			int totalBytes = (totalBits + 7) / 8;
+			byte[] output = new byte[totalBytes];
 
-            return output;
-        }
+			if (startingBit == 1)
+			{
+				output[0] |= 0x80;
+			}
 
-        private static (byte Prefix, byte[] Payload) UnpackBitStream(byte[] data)
-        {
-            if (data.Length == 0) return (0, Array.Empty<byte>());
+			for (int i = 0; i < data.Length; i++)
+			{
+				int bitIndex = 1 + (i * 8);
+				int byteOffset = bitIndex / 8;
+				int shiftOffset = bitIndex % 8;
 
-            byte prefix = (byte)((data[0] & 0x80) >> 7);
+				output[byteOffset] |= (byte)(data[i] >> shiftOffset);
 
-            int totalPayloadBits = (data.Length * 8) - 1;
-            int targetedBytesCount = totalPayloadBits / 8;
-            
-            byte[] payload = new byte[targetedBytesCount];
+				if (byteOffset + 1 < output.Length)
+				{
+					output[byteOffset + 1] |= (byte)(data[i] << (8 - shiftOffset));
+				}
+			}
 
-            for (int i = 0; i < payload.Length; i++)
-            {
-                byte currentPart = (byte)(data[i] << 1);
-                byte nextPart = (byte)((data[i + 1] & 0x80) >> 7);
-                payload[i] = (byte)(currentPart | nextPart);
-            }
+			return output;
+		}
 
-            return (prefix, payload);
-        }
+		private static (byte Prefix, byte[] Payload) UnpackBitStream(byte[] data)
+		{
+			if (data == null || data.Length == 0) return (0, Array.Empty<byte>());
 
-        private void HandleIncomingData(object? sender, ReadOnlyMemory<byte> data)
-        {
-            if (_isDisposed || data.Length == 0) return;
+			byte prefix = (byte)((data[0] & 0x80) >> 7);
 
-            var (prefix, payload) = UnpackBitStream(data.ToArray());
+			int totalPayloadBits = (data.Length * 8) - 1;
+			int targetedBytesCount = (totalPayloadBits + 7) / 8; // Corrected ceiling division roundup
 
-            if (prefix == 0)
-            {
-            }
-            else if (prefix == 1)
-            {
-                // Handle Handshake validation and control frames
-                if (payload.Length > 0 && (char)payload[0] == 'V')
-                {
-                    try
-                    {
-                        // Skip the leading 'V' flag identifier character
-                        using var ms = new MemoryStream(payload, 1, payload.Length - 1);
-                        using var reader = new BinaryReader(ms, Encoding.UTF8);
+			byte[] payload = new byte[targetedBytesCount];
 
-                        // --- STEP 2 & 3: Read version and check if it matches 'VOTE-1.1' ---
-                        string versionString = reader.ReadString();
-                        if (versionString != "VOTE-1.1")
-                        {
-                            _handshakeCompletionSource?.TrySetResult(false);
-                            return;
-                        }
+			for (int i = 0; i < payload.Length; i++)
+			{
+				byte currentPart = (byte)(data[i] << 1);
+				byte nextPart = (i + 1 < data.Length) ? (byte)((data[i + 1] & 0x80) >> 7) : (byte)0;
+				payload[i] = (byte)(currentPart | nextPart);
+			}
 
-                        // --- STEP 4: Unpack continuous instruction array elements ---
-                        int arrayLength = reader.ReadInt32();
-                        for (int i = 0; i < arrayLength; i++)
-                        {
-                            int instructionsLength = reader.ReadInt32();
-                            byte[] instructions = reader.ReadBytes(instructionsLength);
-                            long typeId = reader.ReadInt64();
+			return (prefix, payload);
+		}
 
-                            // Instantiate and map container via assembly specifications
-                            var opType = new Operation.OperationType(instructions, typeId, Env);
-                            _operationTypes[typeId] = opType;
-                        }
+		private void HandleIncomingData(object? sender, ReadOnlyMemory<byte> data)
+		{
+			if (Disconnected || data.Length == 0) return;
 
-                        // Complete connection handshake workflow successfully
-                        _handshakeCompletionSource?.TrySetResult(true);
-                    }
-                    catch
-                    {
-                        _handshakeCompletionSource?.TrySetResult(false);
-                    }
-                }
-                else
-                {
-                    string command = Encoding.UTF8.GetString(payload).TrimEnd('\0');
-                    if (command == "END")
-                    {
-                        OnDisconnect?.Invoke(this, (SocketRequestHandler, "Session ended normally."));
-                        Dispose();
-                    }
-                }
-            }
-        }
+			var (prefix, payload) = UnpackBitStream(data.ToArray());
 
-        private void HandleSocketDisconnection(object? sender, string reason)
-        {
-            if (!_isDisposed && !CancellationToken.IsCancellationRequested)
-            {
-                _ = ReconnectLoopAsync();
-            }
-        }
+			if (prefix == 0)
+			{
+				// Handle payload data standard pathways down-stream
+			}
+			else if (prefix == 1)
+			{
+				if (payload.Length > 0 && (char)payload[0] == 'V')
+				{
+					try
+					{
+						using var ms = new MemoryStream(payload, 1, payload.Length - 1);
+						using var reader = new BinaryReader(ms, Encoding.UTF8);
 
-        public void Dispose()
-        {
-            if (_isDisposed) return;
-            _isDisposed = true;
-            GC.SuppressFinalize(this);
+						string versionString = reader.ReadString();
+						if (versionString != "VOTE-1.1")
+						{
+							_handshakeCompletionSource?.TrySetResult(false);
+							return;
+						}
 
-            _handshakeCompletionSource?.TrySetResult(false);
+						int arrayLength = reader.ReadInt32();
+						for (int i = 0; i < arrayLength; i++)
+						{
+							int instructionsLength = reader.ReadInt32();
+							byte[] instructions = reader.ReadBytes(instructionsLength);
+							long typeId = reader.ReadInt64();
 
-            SocketRequestHandler.OnDataReceived -= HandleIncomingData;
-            SocketRequestHandler.OnDisconnected -= HandleSocketDisconnection;
+							var opType = new Operation.OperationType(instructions, typeId, Env);
+							_operationTypes[typeId] = opType;
+						}
 
-            try
-            {
-                SocketRequestHandler.Dispose();
-            }
-            catch { }
+						_handshakeCompletionSource?.TrySetResult(true);
+					}
+					catch
+					{
+						_handshakeCompletionSource?.TrySetResult(false);
+					}
+				}
+				else
+				{
+					string command = Encoding.UTF8.GetString(payload).TrimEnd('\0');
+					if (command == "END")
+					{
+						OnDisconnect?.Invoke(this, (SocketRequestHandler, "Session ended normally."));
+						Dispose();
+					}
+				}
+			}
+		}
 
-            foreach (var op in _pendingOperations.Values)
-            {
-                op.Dispose();
-            }
-            _pendingOperations.Clear();
-            _operationTypes.Clear();
+		private void HandleSocketDisconnection(object? sender, string reason)
+		{
+			if (!Disconnected && !CancellationToken.IsCancellationRequested)
+			{
+				_ = Task.Run(() => ReconnectLoopAsync());
+			}
+		}
 
-            _connectionLock.Dispose();
-        }
-    }
+		public void Dispose()
+		{
+			// Thread-safe isolation check flag
+			if (Interlocked.Exchange(ref _isDisposedState, 1) == 1) return;
+			GC.SuppressFinalize(this);
+
+			_handshakeCompletionSource?.TrySetResult(false);
+
+			SocketRequestHandler.OnDataReceived -= HandleIncomingData;
+			SocketRequestHandler.OnDisconnected -= HandleSocketDisconnection;
+
+			try
+			{
+				SocketRequestHandler.Dispose();
+			}
+			catch { }
+
+			foreach (var op in _pendingOperations.Values)
+			{
+				op.Dispose();
+			}
+			_pendingOperations.Clear();
+			_operationTypes.Clear();
+
+			_connectionLock.Dispose();
+		}
+	}
 }

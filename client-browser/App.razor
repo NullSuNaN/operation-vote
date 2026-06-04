@@ -1,4 +1,6 @@
+@using System.Collections.Concurrent
 @using System.IO
+@using System.Net
 @using System.Text
 @using System.Threading
 @using Microsoft.AspNetCore.Components.Web
@@ -6,21 +8,24 @@
 @using operation_vote.Client.Request
 @using operation_vote.Shared
 
+@implements IDisposable
+
 @if (!_isOperational)
 {
   <div class="connection-overlay">
     <div class="connection-card">
       <h2>Connect to Vote Node</h2>
       <p>Specify the target infrastructure address below:</p>
-      
+
       <div class="form-group">
-        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/" @onkeypress="HandleConnectKeyPairSubmit" />
+        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/"
+               @onkeypress="HandleConnectKeyPairSubmit" disabled="@_isConnecting" />
       </div>
 
       @if (!string.IsNullOrEmpty(_errorMessage))
       {
         <div class="error-banner">
-          <strong>Error:</strong> @_errorMessage
+          @_errorMessage
         </div>
       }
 
@@ -43,7 +48,7 @@
             <span class="step-dot @(CurrentStep == 4 ? "active" : "")"></span>
             <span class="step-text">Handing off viewport keyboard traps...</span>
           </div>
-          
+
           <div class="mini-progress-track">
             <div class="mini-progress-bar" style="width: @(CurrentStep * 25)%"></div>
           </div>
@@ -60,20 +65,12 @@
 }
 else
 {
-  <div class="voting-container" 
-     @onkeydown="HandleKeyDown" 
-     @onkeyup="HandleKeyUp" 
-     @onmousedown="HandleMouseDown"
-     @onmouseup="HandleMouseUp"
-     @ontouchstart="HandleTouchStart"
-     @ontouchend="HandleTouchEnd"
-     @ontouchstart:preventDefault="true"
-     @ontouchend:preventDefault="true"
-     @oncontextmenu:preventDefault="true"
-     tabindex="0" 	
-     @ref="containerRef"
-     style="touch-action: none; user-select: none; -webkit-user-select: none; outline: none; width: 100%; height: 100vh;">
-  
+  <div class="voting-container" @onkeydown="HandleKeyDown" @onkeyup="HandleKeyUp" @onmousedown="HandleMouseDown"
+       @onmouseup="HandleMouseUp" @ontouchstart="HandleTouchStart" @ontouchend="HandleTouchEnd"
+       @ontouchstart:preventDefault="true" @ontouchend:preventDefault="true" @oncontextmenu:preventDefault="true"
+       tabindex="0" @ref="containerRef"
+       style="touch-action: none; user-select: none; -webkit-user-select: none; outline: none; width: 100%; height: 100vh;">
+
     <div class="status-card @StatusClass">
       <h1>@StatusTitle</h1>
       <p class="status-subtitle">@StatusMessage</p>
@@ -85,12 +82,22 @@ else
 }
 
 @code {
+  private static readonly string InstructionsProtocolVersion = "1.2";
   private ElementReference containerRef;
   private CancellationTokenSource? _cts;
   private SocketRequestHandlerWS? _wsHandler;
   private VotingClient<SocketRequestHandlerWS>? _client;
-  private Dictionary<string, Operation.OperationType> _keyOpMapping = new();
-  private HashSet<string> _pressedInputState = new(); 
+  
+  // Upgraded to concurrent structures to support thread-safe background lookup operations
+  private readonly ConcurrentDictionary<string, OperationData> _keyOpMapping = new();
+  private readonly ConcurrentDictionary<string, byte> _pressedInputState = new();
+  
+  private long _lastClickTicks = DateTime.UtcNow.Ticks;
+  private SortedList<TimeSpan, OperationData>? _timeouts = null;
+  private readonly SemaphoreSlim _afkSignal = new(0, 1);
+  private readonly ReaderWriterLockSlim _afkLock = new();
+  private Task? _afkLoopTask;
+  private CancellationTokenSource? _afkCts;
 
   private bool _isOperational = false;
   private bool _isConnecting = false;
@@ -115,7 +122,7 @@ else
     _errorMessage = "";
     CurrentStep = 1;
     StateHasChanged();
-
+    
     try
     {
       _cts = new CancellationTokenSource();
@@ -124,37 +131,46 @@ else
 
       _client.OnDisconnect += HandleClientDisconnect;
 
-      CurrentStep = 2;       
+      CurrentStep = 2;
       StateHasChanged();
 
-      // 1. Complete the initial connection upgrade
       await _client.ConnectAsync();
+      _ = Task.Run(() => _wsHandler.StartListeningAsync(_cts.Token), _cts.Token);
 
-      // 2. CRITICAL FIX: Manually start the underlying background listening stream loop tasks 
-      // so the app actually processes incoming bytes sent by the server!
-      _ = _wsHandler.StartListeningAsync(_cts.Token);
-
-      CurrentStep = 3;       
+      CurrentStep = 3;
       StateHasChanged();
-      
-      // 3. Give the background streaming worker up to 3 seconds to process the server packets
+
       int checkIntervals = 0;
       while ((_client.OperationTypes == null || _client.OperationTypes.Count == 0) && checkIntervals < 60)
       {
-          await Task.Delay(50);
-          checkIntervals++;
+        await Task.Delay(50, _cts.Token);
+        checkIntervals++;
       }
 
-      try 
+      try
       {
-        ParseServerOperationalProfiles();
+        ParseServerOperationalProfiles(out var parsedTimeouts);
+        
+        _afkLock.EnterWriteLock();
+        try
+        {
+          _timeouts = parsedTimeouts;
+        }
+        finally
+        {
+          _afkLock.ExitWriteLock();
+        }
+        
+        // Reset and trigger background loop synchronization activity
+        Interlocked.Exchange(ref _lastClickTicks, DateTime.UtcNow.Ticks);
+        _afkSignal.Release();
       }
       catch (Exception parseEx)
       {
         Console.WriteLine($"[Bypass Warning] Operational data profile mapping skipped: {parseEx.Message}");
       }
 
-      CurrentStep = 4;       
+      CurrentStep = 4;
       StateHasChanged();
 
       StatusTitle = "System Operational";
@@ -163,37 +179,36 @@ else
       _isOperational = true;
       StateHasChanged();
 
-      _ = Task.Delay(100).ContinueWith(async _ => {
+      _ = Task.Delay(100).ContinueWith(async _ =>
+      {
         try { await containerRef.FocusAsync(); } catch { /* no-op */ }
       });
     }
     catch (Exception ex)
     {
       string actualFailureDetail = ex.Message;
-      
       if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") || actualFailureDetail.Contains("ObjectDisposed"))
       {
-          if (ex.InnerException != null)
-          {
-              actualFailureDetail = ex.InnerException.Message;
-          }
-          else if (_wsHandler != null && !_wsHandler.IsConnected)
-          {
-              actualFailureDetail = "Remote server rejected or dropped connection immediately following successful handshake.";
-          }
-          else 
-          {
-              actualFailureDetail = "Handshake synchronization timeout. No operational parameters received from host node.";
-          }
+        if (ex.InnerException != null)
+        {
+          actualFailureDetail = ex.InnerException.Message;
+        }
+        else if (_wsHandler != null && !_wsHandler.IsConnected)
+        {
+          actualFailureDetail = "Remote server rejected or dropped connection immediately following successful handshake.";
+        }
+        else
+        {
+          actualFailureDetail = "Handshake synchronization timeout. No operational parameters received from host node.";
+        }
       }
 
       _errorMessage = $"Handshake failure: {actualFailureDetail}";
-      
       _isConnecting = false;
       CurrentStep = 0;
       StateHasChanged();
 
-      await Task.Delay(200); 
+      await Task.Delay(200);
       DisconnectAndReset();
     }
     finally
@@ -206,7 +221,20 @@ else
 
   private void HandleClientDisconnect(object? sender, (SocketRequestHandlerWS Handler, string Reason) data)
   {
-    InvokeAsync(() => {
+    _afkLock.EnterWriteLock();
+    try
+    {
+      _timeouts = null;
+    }
+    finally
+    {
+      _afkLock.ExitWriteLock();
+    }
+    
+    try { _afkSignal.Release(); } catch { /* no-op */ }
+
+    InvokeAsync(() =>
+    {
       _errorMessage = $"Server disconnected connection: {data.Reason}";
       DisconnectAndReset();
       StateHasChanged();
@@ -253,31 +281,58 @@ else
     }
   }
 
-  private void ParseServerOperationalProfiles()
+  private void ParseServerOperationalProfiles(out SortedList<TimeSpan, OperationData> afkList)
   {
+    afkList = [];
     if (_client == null || _client.OperationTypes == null) return;
+    
     var availableOpTypes = _client.OperationTypes.Values.ToList();
     foreach (var opType in availableOpTypes)
     {
       if (opType?.Instructions == null || opType.Instructions.Length == 0) continue;
+      
       var instructionsStrings = new List<string>();
       using var ms = new MemoryStream(opType.Instructions);
       using var reader = new BinaryReader(ms, Encoding.UTF8);
-      if (ms.Length >= 5)
+      TimeSpan? afk = null;
+      
+      try
       {
-        byte[] headerBytes = reader.ReadBytes(5);
-        if (Encoding.UTF8.GetString(headerBytes) != "keys:") ms.Position = 0;
+        var header = reader.ReadString();
+        if (header != $"V{InstructionsProtocolVersion}") throw new ProtocolViolationException("Instructions protocol is mismatched.");
+        
+        while (ms.Position < ms.Length)
+        {
+          var instructionType = reader.ReadString();
+          switch (instructionType)
+          {
+            case "keys:":
+              var keysLength = reader.Read7BitEncodedInt64();
+              for (int i = 0; i < keysLength; ++i)
+              {
+                instructionsStrings.Add(reader.ReadString());
+              }
+              break;
+            case "afk:":
+              afk = TimeSpan.FromMilliseconds(reader.ReadDouble());
+              break;
+          }
+        }
+      }
+      catch
+      {
+        continue;
       }
 
-      while (ms.Position < ms.Length)
-      {
-        instructionsStrings.Add(reader.ReadString());
-      }
-
+      OperationData result = new(opType, afk);
       foreach (string key in instructionsStrings)
       {
         if (!string.IsNullOrEmpty(key))
-          _keyOpMapping[key] = opType;
+          _keyOpMapping[key] = result;
+      }
+      if (afk != null)
+      {
+        afkList[afk.Value] = result;
       }
     }
   }
@@ -287,56 +342,65 @@ else
 
   private async Task HandleMouseDown(MouseEventArgs e)
   {
-    if(_touched){
-      return;
-    }
+    if (_touched) return;
     string? mouseKey = ConvertButtonToKey(e.Button);
     if (mouseKey != null) await ProcessInputDownAsync(mouseKey);
   }
 
   private async Task HandleMouseUp(MouseEventArgs e)
   {
-    if(_touched){
-      _touched=false;
+    if (_touched)
+    {
+      _touched = false;
       return;
     }
     string? mouseKey = ConvertButtonToKey(e.Button);
     if (mouseKey != null) await ProcessInputUpAsync(mouseKey);
   }
 
-  private async Task HandleTouchStart(TouchEventArgs e) {
-    _touched=true;
+  private async Task HandleTouchStart(TouchEventArgs e)
+  {
+    _touched = true;
     await ProcessInputDownAsync("MouseLeft");
   }
+  
   private Task HandleTouchEnd(TouchEventArgs e) => ProcessInputUpAsync("MouseLeft");
 
   private async Task ProcessInputDownAsync(string inputKey)
   {
     if (_client == null || !_isOperational) return;
-    if (_keyOpMapping.TryGetValue(inputKey, out var targetedOpType) && !_pressedInputState.Contains(inputKey))
-    {
-      _pressedInputState.Add(inputKey);
-      StatusTitle = "Action Active";
-      StatusMessage = $"Holding: '{inputKey}'";
-      StatusClass = "active";
+    HandleUserOperation();
 
-      var supportOp = new Operation(targetedOpType, VoteType.Support, []);
-      await _client.SendOperationAsync(supportOp, default);
+    if (_keyOpMapping.TryGetValue(inputKey, out var targetedOpData))
+    {
+      if (_pressedInputState.TryAdd(inputKey, 0))
+      {
+        StatusTitle = "Action Active";
+        StatusMessage = $"Holding: '{inputKey}'";
+        StatusClass = "active";
+
+        using var supportOp = new Operation(targetedOpData.Type, VoteType.Support, Array.Empty<byte>());
+        await _client.SendOperationAsync(supportOp, default);
+      }
     }
   }
 
   private async Task ProcessInputUpAsync(string inputKey)
   {
     if (_client == null || !_isOperational) return;
-    if (_keyOpMapping.TryGetValue(inputKey, out var targetedOpType) && _pressedInputState.Contains(inputKey))
-    {
-      _pressedInputState.Remove(inputKey);
-      StatusTitle = "Action Released";
-      StatusMessage = $"Released: '{inputKey}'";
-      StatusClass = "ready";
+    HandleUserOperation();
 
-      var releaseOp = new Operation(targetedOpType, VoteType.Against, []);
-      await _client.SendOperationAsync(releaseOp, default);
+    if (_keyOpMapping.TryGetValue(inputKey, out var targetedOpData))
+    {
+      if (_pressedInputState.TryRemove(inputKey, out _))
+      {
+        StatusTitle = "Action Released";
+        StatusMessage = $"Released: '{inputKey}'";
+        StatusClass = "ready";
+
+        using var releaseOp = new Operation(targetedOpData.Type, VoteType.Against, Array.Empty<byte>());
+        await _client.SendOperationAsync(releaseOp, default);
+      }
     }
   }
 
@@ -347,4 +411,104 @@ else
     2 => "MouseRight",
     _ => null
   };
+
+  private void HandleUserOperation()
+  {
+    Interlocked.Exchange(ref _lastClickTicks, DateTime.UtcNow.Ticks);
+    try { _afkSignal.Release(); } catch { /* no-op */ }
+  }
+
+  private async Task AFKProcessingThreadAsync(CancellationToken token)
+  {
+    while (!token.IsCancellationRequested)
+    {
+      SortedList<TimeSpan, OperationData>? localTimeouts;
+      long clickTicks;
+
+      _afkLock.EnterReadLock();
+      try
+      {
+        localTimeouts = _timeouts;
+        clickTicks = Volatile.Read(ref _lastClickTicks);
+      }
+      finally
+      {
+        _afkLock.ExitReadLock();
+      }
+
+      if (localTimeouts == null)
+      {
+        try { await _afkSignal.WaitAsync(token); } catch (OperationCanceledException) { break; }
+        continue;
+      }
+
+      DateTime lastClickTime = new DateTime(Volatile.Read(ref clickTicks), DateTimeKind.Utc);
+      TimeSpan lowestWait = TimeSpan.MaxValue;
+      bool executePulse = false;
+      OperationData? targetedOp = null;
+
+      foreach (var item in localTimeouts)
+      {
+        TimeSpan calculatedDeadline = item.Key;
+        TimeSpan elapsed = DateTime.UtcNow - lastClickTime;
+        TimeSpan remainingWait = calculatedDeadline - elapsed;
+
+        if (remainingWait <= TimeSpan.Zero)
+        {
+          executePulse = true;
+          targetedOp = item.Value;
+          break;
+        }
+        else if (remainingWait < lowestWait)
+        {
+          lowestWait = remainingWait;
+        }
+      }
+
+      if (executePulse && targetedOp != null)
+      {
+        var activeClient = _client;
+        if (activeClient != null && _isOperational)
+        {
+          try
+          {
+            using var afkOp = new Operation(targetedOp.Type, VoteType.Abstain, Array.Empty<byte>());
+            await activeClient.SendOperationAsync(afkOp, token);
+          }
+          catch { /* Handle drop errors contextually */ }
+        }
+        
+        // Sleep for a short cool-down period before tracking the next timing window match
+        try { await Task.Delay(1000, token); } catch (OperationCanceledException) { break; }
+      }
+      else
+      {
+        int waitMilliseconds = lowestWait == TimeSpan.MaxValue ? -1 : (int)lowestWait.TotalMilliseconds;
+        try
+        {
+          await _afkSignal.WaitAsync(waitMilliseconds, token);
+        }
+        catch (OperationCanceledException)
+        {
+          break;
+        }
+      }
+    }
+  }
+
+  protected override void OnInitialized()
+  {
+    _afkCts = new CancellationTokenSource();
+    _afkLoopTask = AFKProcessingThreadAsync(_afkCts.Token);
+  }
+
+  public void Dispose()
+  {
+    try { _afkCts?.Cancel(); } catch { /* no-op */ }
+    try { _afkCts?.Dispose(); } catch { /* no-op */ }
+    try { _afkSignal?.Dispose(); } catch { /* no-op */ }
+    try { _afkLock?.Dispose(); } catch { /* no-op */ }
+    
+    DisconnectAndReset();
+  }
 }

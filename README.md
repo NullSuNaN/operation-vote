@@ -34,6 +34,7 @@ client-window localhost:9055 wss # connect to localhost:9055 with WSS
     {
       "Name": "jump",
       "Keys": ["w", "W", " ", "ArrowUp", "MouseLeft"],
+      "AfkLimit": "00:00:07",
       "VoteResults": [
         {
           "type": "PressKey",

@@ -17,7 +17,8 @@ namespace operation_vote.Interface.Server
   public record ProfileConfig(
     [property: JsonPropertyName("Name")] string Name,
     [property: JsonPropertyName("Keys")] string[] Keys,
-    [property: JsonPropertyName("VoteResults")] List<BaseResultConfig> VoteResults
+    [property: JsonPropertyName("VoteResults")] List<BaseResultConfig> VoteResults,
+    [property: JsonPropertyName("AfkLimit")] string? AfkLimit
   );
 
   public record ServerAppConfig(
@@ -117,7 +118,19 @@ namespace operation_vote.Interface.Server
       foreach (var profile in config.Profiles)
       {
         long targetId = NewId;
-        byte[] packedBytes = PackKeysToBinary(profile.Keys);
+        TimeSpan? afkSpan = null;
+        if(profile.AfkLimit != null)
+        {
+          if(TimeSpan.TryParse(profile.AfkLimit.AsSpan(), out var _afkSpan)){
+            afkSpan=_afkSpan;
+            ServerLogger.logger.LogInformation(()=>$"Parsed AFK time limit for {profile.Name}: {profile.AfkLimit} as {_afkSpan}");
+          }
+          else
+          {
+            ServerLogger.logger.LogError(()=>$"Failed to parse AFK time limit for {profile.Name}: {profile.AfkLimit}");
+          }
+        }
+        byte[] packedBytes = PackKeysToBinary(profile.Keys, afkSpan);
         Operation.OperationType newType = new(packedBytes, targetId);
 
         operationalSuite.Add(newType);
@@ -160,15 +173,23 @@ namespace operation_vote.Interface.Server
       Console.WriteLine("Server is closed.");
     }
 
-    private static byte[] PackKeysToBinary(string[] instructions)
+    private static byte[] PackKeysToBinary(string[] keys, TimeSpan? afk)
     {
       using var ms = new MemoryStream();
       using (var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
       {
-        writer.Write((char[])[.. "keys:"]);
-        foreach (var str in instructions)
+        writer.Write("V1.2");
+        writer.Write("keys:");
+        writer.Write7BitEncodedInt64(keys.LongLength);
+        foreach (var str in keys)
         {
           writer.Write(str);
+        }
+        if(afk != null)
+        {
+          writer.Write("afk:");
+          Console.WriteLine($"Sent afk: {afk.Value}");
+          writer.Write((double)afk.Value.TotalMilliseconds);
         }
       }
       return ms.ToArray();

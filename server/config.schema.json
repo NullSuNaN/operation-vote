@@ -64,6 +64,10 @@
             },
             "minItems": 1
           },
+          "AfkLimit": {
+            "type": "string",
+            "description": "A TimeSpan expression."
+          },
           "VoteResults": {
             "type": "array",
             "description": "Polymorphic layout metric threshold evaluation matrix profiles mapping operational results.",

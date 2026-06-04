@@ -9,6 +9,7 @@
     <RootNamespace>operation_vote.Interface.ClientBrowser</RootNamespace>
     <BlazorCacheBootResources>false</BlazorCacheBootResources>
     <RuntimeIdentifiers>browser-wasm</RuntimeIdentifiers>
+    <!-- <WasmEnableThreads>true</WasmEnableThreads> -->
   </PropertyGroup>
 
   <ItemGroup>

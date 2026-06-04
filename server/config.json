@@ -9,6 +9,7 @@
     {
       "Name": "jump",
       "Keys": ["w", "W", " ", "ArrowUp", "MouseLeft"],
+      "AfkLimit": "00:00:07",
       "VoteResults": [
         {
           "type": "PressKey",
