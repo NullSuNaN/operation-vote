@@ -136,7 +136,6 @@ else
       StateHasChanged();
 
       await _client.ConnectAsync();
-      _ = Task.Run(() => _wsHandler.StartListeningAsync(_cts.Token), _cts.Token);
 
       CurrentStep = 3;
       StateHasChanged();
@@ -339,7 +338,6 @@ actualFailureDetail.Contains("ObjectDisposed"))
     }
   }
 
-  [ActivatorUtilitiesConstructor]
   private async Task HandleKeyDown(KeyboardEventArgs e) => await ProcessInputDownAsync(e.Key);
   private async Task HandleKeyUp(KeyboardEventArgs e) => await ProcessInputUpAsync(e.Key);
 
@@ -533,7 +531,7 @@ actualFailureDetail.Contains("ObjectDisposed"))
   // @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
   //     @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
   public Task OHandleKeyDown(KeyboardEventArgs e) => EventWrapper(HandleKeyDown(e));
-  public Task OHandleKeyUp(KeyboardEventArgs e) => EventWrapper(HandleKeyDown(e));
+  public Task OHandleKeyUp(KeyboardEventArgs e) => EventWrapper(HandleKeyUp(e));
   public Task OHandleMouseDown(MouseEventArgs e) => EventWrapper(HandleMouseDown(e));
   public Task OHandleMouseUp(MouseEventArgs e) => EventWrapper(HandleMouseUp(e));
   public Task OHandleTouchStart(TouchEventArgs e) => EventWrapper(HandleTouchStart(e));

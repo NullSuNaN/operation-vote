@@ -70,7 +70,7 @@ namespace operation_vote.Client.Request
         {
           // For large payloads, WebSockets chunk the data. 
           // We'll use a MemoryStream to stitch chunks together if endOfMessage is false.
-          using var messageStream = new System.IO.MemoryStream();
+          using var messageStream = new MemoryStream();
           WebSocketReceiveResult result;
 
           do
