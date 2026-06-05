@@ -136,6 +136,7 @@ namespace operation_vote.Client.Request
     public void Dispose()
     {
       if (_isDisposed) return;
+      HandleDisconnect("Client is closed.");
 
       _cts?.Cancel();
       _cts?.Dispose();

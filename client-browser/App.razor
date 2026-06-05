@@ -3,6 +3,7 @@
 @using System.Net
 @using System.Text
 @using System.Threading
+@using System.Diagnostics
 @using Microsoft.AspNetCore.Components.Web
 @using operation_vote.Client
 @using operation_vote.Client.Request
@@ -65,8 +66,8 @@
 }
 else
 {
-  <div class="voting-container" @onkeydown="HandleKeyDown" @onkeyup="HandleKeyUp" @onmousedown="HandleMouseDown"
-       @onmouseup="HandleMouseUp" @ontouchstart="HandleTouchStart" @ontouchend="HandleTouchEnd"
+  <div class="voting-container" @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
+       @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
        @ontouchstart:preventDefault="true" @ontouchend:preventDefault="true" @oncontextmenu:preventDefault="true"
        tabindex="0" @ref="containerRef"
        style="touch-action: none; user-select: none; -webkit-user-select: none; outline: none; width: 100%; height: 100vh;">
@@ -87,11 +88,11 @@ else
   private CancellationTokenSource? _cts;
   private SocketRequestHandlerWS? _wsHandler;
   private VotingClient<SocketRequestHandlerWS>? _client;
-  
+
   // Upgraded to concurrent structures to support thread-safe background lookup operations
   private readonly ConcurrentDictionary<string, OperationData> _keyOpMapping = new();
   private readonly ConcurrentDictionary<string, byte> _pressedInputState = new();
-  
+
   private long _lastClickTicks = DateTime.UtcNow.Ticks;
   private SortedList<TimeSpan, OperationData>? _timeouts = null;
   private readonly SemaphoreSlim _afkSignal = new(0, 1);
@@ -122,7 +123,7 @@ else
     _errorMessage = "";
     CurrentStep = 1;
     StateHasChanged();
-    
+
     try
     {
       _cts = new CancellationTokenSource();
@@ -150,7 +151,7 @@ else
       try
       {
         ParseServerOperationalProfiles(out var parsedTimeouts);
-        
+
         _afkLock.EnterWriteLock();
         try
         {
@@ -160,7 +161,7 @@ else
         {
           _afkLock.ExitWriteLock();
         }
-        
+
         // Reset and trigger background loop synchronization activity
         Interlocked.Exchange(ref _lastClickTicks, DateTime.UtcNow.Ticks);
         _afkSignal.Release();
@@ -187,7 +188,8 @@ else
     catch (Exception ex)
     {
       string actualFailureDetail = ex.Message;
-      if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") || actualFailureDetail.Contains("ObjectDisposed"))
+      if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") ||
+actualFailureDetail.Contains("ObjectDisposed"))
       {
         if (ex.InnerException != null)
         {
@@ -230,7 +232,7 @@ else
     {
       _afkLock.ExitWriteLock();
     }
-    
+
     try { _afkSignal.Release(); } catch { /* no-op */ }
 
     InvokeAsync(() =>
@@ -285,22 +287,22 @@ else
   {
     afkList = [];
     if (_client == null || _client.OperationTypes == null) return;
-    
+
     var availableOpTypes = _client.OperationTypes.Values.ToList();
     foreach (var opType in availableOpTypes)
     {
       if (opType?.Instructions == null || opType.Instructions.Length == 0) continue;
-      
+
       var instructionsStrings = new List<string>();
       using var ms = new MemoryStream(opType.Instructions);
       using var reader = new BinaryReader(ms, Encoding.UTF8);
       TimeSpan? afk = null;
-      
+
       try
       {
         var header = reader.ReadString();
         if (header != $"V{InstructionsProtocolVersion}") throw new ProtocolViolationException("Instructions protocol is mismatched.");
-        
+
         while (ms.Position < ms.Length)
         {
           var instructionType = reader.ReadString();
@@ -337,6 +339,7 @@ else
     }
   }
 
+  [ActivatorUtilitiesConstructor]
   private async Task HandleKeyDown(KeyboardEventArgs e) => await ProcessInputDownAsync(e.Key);
   private async Task HandleKeyUp(KeyboardEventArgs e) => await ProcessInputUpAsync(e.Key);
 
@@ -363,7 +366,7 @@ else
     _touched = true;
     await ProcessInputDownAsync("MouseLeft");
   }
-  
+
   private Task HandleTouchEnd(TouchEventArgs e) => ProcessInputUpAsync("MouseLeft");
 
   private async Task ProcessInputDownAsync(string inputKey)
@@ -477,7 +480,7 @@ else
           }
           catch { /* Handle drop errors contextually */ }
         }
-        
+
         // Sleep for a short cool-down period before tracking the next timing window match
         try { await Task.Delay(1000, token); } catch (OperationCanceledException) { break; }
       }
@@ -508,7 +511,31 @@ else
     try { _afkCts?.Dispose(); } catch { /* no-op */ }
     try { _afkSignal?.Dispose(); } catch { /* no-op */ }
     try { _afkLock?.Dispose(); } catch { /* no-op */ }
-    
+
     DisconnectAndReset();
   }
+  
+  public async Task EventWrapper(Task result){
+    try
+    {
+      await result;
+    }
+    catch(Exception e)
+    {
+      _errorMessage = e.Message;
+      try
+      {
+        _client?.Dispose();
+      }
+      finally {};
+    }
+  }
+  // @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
+  //     @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
+  public Task OHandleKeyDown(KeyboardEventArgs e) => EventWrapper(HandleKeyDown(e));
+  public Task OHandleKeyUp(KeyboardEventArgs e) => EventWrapper(HandleKeyDown(e));
+  public Task OHandleMouseDown(MouseEventArgs e) => EventWrapper(HandleMouseDown(e));
+  public Task OHandleMouseUp(MouseEventArgs e) => EventWrapper(HandleMouseUp(e));
+  public Task OHandleTouchStart(TouchEventArgs e) => EventWrapper(HandleTouchStart(e));
+  public Task OHandleTouchEnd(TouchEventArgs e) => EventWrapper(HandleTouchEnd(e));
 }

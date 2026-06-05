@@ -1,10 +1,11 @@
  #! /usr/bin/env bash
-unset ver dict thread_limit i system proj_type dict_proj output err failed
+unset ver filter dict tgList tgDict _tgList thread_limit i system proj_type dict_proj output err failed
 [ "$#" -lt 1 ] && {
-  echo 'Usage: createReleaseBundle.sh <version>'
+  echo 'Usage: createReleaseBundle.sh <version> [<filter:regex>:.*]'
   exit 2
 }
 ver="$1"  
+filter="${2-.*}"
 [[ "$ver" =~ ^[0-9]+(\.[0-9]+)*$ ]] || {
   echo 'Illegal Version.'
   exit 2
@@ -45,11 +46,33 @@ err() {
   echo -ne '\0' >&5
   echo -n " " >&4
 }
+listArr() {
+  echo -n "$1"
+  shift
+  local i=
+  for i;do
+    echo
+    echo -n "$i"
+  done
+}
 
 trap 'kill -SIGINT %_ 2>/dev/null' SIGINT
 trap 'kill -SIGINT %_ 2>/dev/null' EXIT
+tgList=()
 for system in win-x86 win-x64 linux-arm linux-x64; do
-  { # server
+  for proj_type in server client-window client-browser; do
+    tgList[${#tgList[@]}]="$proj_type-$system"
+  done
+done
+readarray -t _tgList < <(grep --color=never -E "$filter" - < <(listArr "${tgList[@]}"))
+echo "Building: ${_tgList[@]}"
+declare -A tgDict
+for i in "${_tgList[@]}";do
+  tgDict["$i"]=1
+done
+
+for system in win-x86 win-x64 linux-arm linux-x64; do
+  [ "${tgDict["server-$system"]}" == 1 ] && { # server
     trap 'echo -n " " >&3;exit 130' SIGINT
     read -r -N 1 <&3
     proj_type=server
@@ -79,7 +102,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
     echo -n " " >&4
     echo -n ' ' >&3
   } &
-  { # client-window
+  [ "${tgDict["client-window-$system"]}" == 1 ] && { # client-window
     trap 'echo -n " " >&3;exit 130' SIGINT
     read -r -N 1 <&3
     proj_type=client-window
@@ -107,7 +130,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
     echo -n " " >&4
     echo -n ' ' >&3
   } &
-  { # client-browser
+  [ "${tgDict["client-browser-$system"]}" == 1 ] && { # client-browser
     trap 'echo -n " " >&3;exit 130' SIGINT
     read -r -N 1 <&3
     read -r -N 1 <&6
