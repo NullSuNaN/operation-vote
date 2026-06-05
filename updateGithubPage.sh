@@ -9,3 +9,4 @@ ver="$1"
   exit 2
 }
 dotnet publish client-browser/ -c Release -o page/ -p:Version="$ver" || echo "Failed to build $proj_type-$system"$'\n'
+mv page/wwwroot page/html
