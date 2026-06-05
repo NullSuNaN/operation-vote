@@ -1,10 +1,10 @@
-#! /usr/bin/env bash
+ #! /usr/bin/env bash
 unset ver dict thread_limit i system proj_type dict_proj output err failed
 [ "$#" -lt 1 ] && {
   echo 'Usage: createReleaseBundle.sh <version>'
   exit 2
 }
-ver="$1"
+ver="$1"  
 [[ "$ver" =~ ^[0-9]+(\.[0-9]+)*$ ]] || {
   echo 'Illegal Version.'
   exit 2
