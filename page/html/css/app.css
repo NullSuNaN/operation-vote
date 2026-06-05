@@ -169,3 +169,8 @@ html, body {
     background-color: #3498db;
     transition: width 0.3s ease;
 }
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+}

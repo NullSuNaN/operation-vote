@@ -10,6 +10,7 @@
 @using operation_vote.Shared
 
 @implements IDisposable
+@inject NavigationManager navigationManager
 
 @if (!_isOperational)
 {
@@ -21,6 +22,9 @@
       <div class="form-group">
         <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/"
                @onkeypress="HandleConnectKeyPairSubmit" disabled="@_isConnecting" />
+        @if(navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)){
+          <small>Connecting to ws://(instead of wss://) servers in this https:// page may fail and silently crash the app.</small>
+        }
       </div>
 
       @if (!string.IsNullOrEmpty(_errorMessage))
