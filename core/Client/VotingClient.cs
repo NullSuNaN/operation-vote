@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Net;
 using System.Text;
 using operation_vote.Client.Request;
+using operation_vote.Shared;
 
 namespace operation_vote.Client
 {
@@ -45,8 +47,12 @@ namespace operation_vote.Client
 		public readonly CancellationToken CancellationToken;
 		public readonly VotingEnv Env = new();
 		public ReadOnlyDictionary<long, Operation.OperationType> OperationTypes => _operationTypes.AsReadOnly();
+		public AuthenticationClient.AuthenticationData? authenticationData = null;
 
 		public event EventHandler<(T, string)>? OnDisconnect;
+		public event EventHandler<bool>? OnAuthorizationFinished;
+		private readonly TaskCompletionSource<string> AuthenticationFetchToken = new();
+		private readonly TaskCompletionSource<bool> AuthenticationResult = new();
 
 		public VotingClient(T socketRequestHandler, string uri, CancellationToken token = default)
 		{
@@ -79,10 +85,13 @@ namespace operation_vote.Client
 				// Start inbound listener processing pathway
 				_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
 
-				// --- STEP 1: Pack and transmit Bit 1 + 'INIT' Handshake Frame ---
-				byte[] initTextBytes = Encoding.UTF8.GetBytes("INIT");
-				byte[] initPacket = PackBitStream(1, initTextBytes);
-				await SocketRequestHandler.SendAsync(initPacket, CancellationToken).ConfigureAwait(false);
+				// --- STEP 1: Pack and transmit 1 + 'INIT' Handshake Frame ---
+				using var ms = new MemoryStream();
+				using var writer = new BinaryWriter(ms, Encoding.UTF8);
+
+				writer.Write(true);
+				writer.Write("INIT");
+				await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
 
 				// Wait for the server data arrival to execute version checks
 				bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
@@ -91,6 +100,38 @@ namespace operation_vote.Client
 					await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
 					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Failed to initialize the connection."));
 					Dispose();
+				}
+
+				// Authorize if the client is logged in
+				var _authenticationData = Volatile.Read(ref authenticationData);
+				if(_authenticationData != null)
+				{
+					bool authSuccess = await AuthenticationClient.AuthenticateAsync(
+						Volatile.Read(ref _authenticationData),
+						async data =>
+						{
+							using var ms = new MemoryStream();
+							using var writer = new BinaryWriter(ms, Encoding.UTF8);
+							writer.Write(true);
+							writer.Write("AUTH");
+							writer.Flush();
+							await SocketRequestHandler.SendAsync(ms.ToArray());
+							return await AuthenticationFetchToken.Task;
+						},
+						async data =>
+						{
+							using var ms = new MemoryStream();
+							using var writer = new BinaryWriter(ms, Encoding.UTF8);
+							writer.Write(true);
+							writer.Write("AUTH_RES");
+							writer.Write7BitEncodedInt(data.Length);
+							writer.Write(data);
+							writer.Flush();
+							await SocketRequestHandler.SendAsync(ms.ToArray());
+							return await AuthenticationResult.Task;
+						}
+					);
+					OnAuthorizationFinished?.Invoke(this, authSuccess);
 				}
 			}
 			catch
@@ -110,10 +151,13 @@ namespace operation_vote.Client
 
 			_pendingOperations[operation.Id] = operation;
 
-			byte[] rawOperationBytes = operation.ToByteArray();
-			byte[] fullPacket = PackBitStream(0, rawOperationBytes);
+			using var ms = new MemoryStream();
+			using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
-			await SocketRequestHandler.SendAsync(fullPacket, token).ConfigureAwait(false);
+			writer.Write(false);
+			operation.Serialize(writer);
+
+			await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);
 		}
 
 		private async Task ReconnectLoopAsync()
@@ -147,17 +191,22 @@ namespace operation_vote.Client
 						continue;
 					}
 
-					byte[] rawOpBytes = pair.Value.ToByteArray();
-					byte[] replayPacket = PackBitStream(0, rawOpBytes);
+					using var opMs = new MemoryStream();
+					using var opWriter = new BinaryWriter(opMs, Encoding.UTF8);
 
-					await SocketRequestHandler.SendAsync(replayPacket, CancellationToken).ConfigureAwait(false);
+					opWriter.Write(false);
+					pair.Value.Serialize(opWriter);
+
+					await SocketRequestHandler.SendAsync(opMs.ToArray(), CancellationToken).ConfigureAwait(false);
 				}
 
 				// 2. Re-send Handshake registration
-				byte[] regCmdBytes = Encoding.UTF8.GetBytes("REG");
-				byte[] registrationPacket = PackBitStream(1, regCmdBytes);
+				using var ms = new MemoryStream();
+				using var writer = new BinaryWriter(ms, Encoding.UTF8);
+				writer.Write(true);
+				writer.Write("REG");
 
-				await SocketRequestHandler.SendAsync(registrationPacket, CancellationToken).ConfigureAwait(false);
+				await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
 
 				_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
 			}
@@ -175,76 +224,19 @@ namespace operation_vote.Client
 			}
 		}
 
-		private static byte[] PackBitStream(byte startingBit, byte[] data)
-		{
-			int totalBits = 1 + (data.Length * 8);
-			int totalBytes = (totalBits + 7) / 8;
-			byte[] output = new byte[totalBytes];
-
-			if (startingBit == 1)
-			{
-				output[0] |= 0x80;
-			}
-
-			for (int i = 0; i < data.Length; i++)
-			{
-				int bitIndex = 1 + (i * 8);
-				int byteOffset = bitIndex / 8;
-				int shiftOffset = bitIndex % 8;
-
-				output[byteOffset] |= (byte)(data[i] >> shiftOffset);
-
-				if (byteOffset + 1 < output.Length)
-				{
-					output[byteOffset + 1] |= (byte)(data[i] << (8 - shiftOffset));
-				}
-			}
-
-			return output;
-		}
-
-		private static (byte Prefix, byte[] Payload) UnpackBitStream(byte[] data)
-		{
-			if (data == null || data.Length == 0) return (0, Array.Empty<byte>());
-
-			byte prefix = (byte)((data[0] & 0x80) >> 7);
-
-			int totalPayloadBits = (data.Length * 8) - 1;
-			int targetedBytesCount = (totalPayloadBits + 7) / 8; // Corrected ceiling division roundup
-
-			byte[] payload = new byte[targetedBytesCount];
-
-			for (int i = 0; i < payload.Length; i++)
-			{
-				byte currentPart = (byte)(data[i] << 1);
-				byte nextPart = (i + 1 < data.Length) ? (byte)((data[i + 1] & 0x80) >> 7) : (byte)0;
-				payload[i] = (byte)(currentPart | nextPart);
-			}
-
-			return (prefix, payload);
-		}
-
 		private void HandleIncomingData(object? sender, ReadOnlyMemory<byte> data)
 		{
 			if (Disconnected || data.Length == 0) return;
-
-			var (prefix, payload) = UnpackBitStream(data.ToArray());
-
-			if (prefix == 0)
+			using var ms = new MemoryStream(data.ToArray());
+			using var reader = new BinaryReader(ms, Encoding.UTF8);
+			string command = reader.ReadString();
+			switch (command)
 			{
-				// Handle payload data standard pathways down-stream
-			}
-			else if (prefix == 1)
-			{
-				if (payload.Length > 0 && (char)payload[0] == 'V')
-				{
+				case "INIT":
 					try
 					{
-						using var ms = new MemoryStream(payload, 1, payload.Length - 1);
-						using var reader = new BinaryReader(ms, Encoding.UTF8);
-
 						string versionString = reader.ReadString();
-						if (versionString != "VOTE-1.1")
+						if (versionString != $"VOTE-{ProtocolInfo.Version}")
 						{
 							_handshakeCompletionSource?.TrySetResult(false);
 							return;
@@ -267,16 +259,19 @@ namespace operation_vote.Client
 					{
 						_handshakeCompletionSource?.TrySetResult(false);
 					}
-				}
-				else
-				{
-					string command = Encoding.UTF8.GetString(payload).TrimEnd('\0');
-					if (command == "END")
-					{
-						OnDisconnect?.Invoke(this, (SocketRequestHandler, "Session ended normally."));
-						Dispose();
-					}
-				}
+					break;
+				case "END":
+					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Session ended normally."));
+					Dispose();
+					break;
+				case "AUTH":
+					AuthenticationFetchToken.SetResult(reader.ReadString());
+					break;
+				case "AUTH_RES":
+					AuthenticationResult.SetResult(reader.ReadBoolean());
+					break;
+				default:
+					throw new ProtocolViolationException($"Invalid command: {command}");
 			}
 		}
 

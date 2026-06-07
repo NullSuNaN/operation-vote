@@ -10,13 +10,13 @@ namespace operation_vote.Server.Network
   {
     private readonly TcpListener _listener = new(IPAddress.Parse(ipAddress), port);
     private readonly CancellationTokenSource _cts = new();
-    private readonly ConcurrentDictionary<Guid, TcpClient> _clients = new();
+    private readonly ConcurrentDictionary<ClientInfo, TcpClient> _clients = new();
 
-    public event EventHandler<Guid>? OnChannelClientConnected;
-    public event EventHandler<(Guid ClientId, string Reason)>? OnChannelClientDisconnected;
-    public event EventHandler<(Guid ClientId, byte[] Payload)>? OnChannelDataReceived;
+    public event EventHandler<ClientInfo>? OnChannelClientConnected;
+    public event EventHandler<(ClientInfo Client, string Reason)>? OnChannelClientDisconnected;
+    public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataReceived;
 
-    public async Task StartAsync()
+    public async Task StartAsync(User unauthorizedUser)
     {
       _listener.Start();
       try
@@ -25,16 +25,17 @@ namespace operation_vote.Server.Network
         {
           TcpClient client = await _listener.AcceptTcpClientAsync(_cts.Token);
           Guid clientId = Guid.NewGuid();
-          _clients[clientId] = client;
+          ClientInfo clientInfo = new(this, clientId, unauthorizedUser);
+          _clients[clientInfo] = client;
 
-          OnChannelClientConnected?.Invoke(this, clientId);
-          _ = Task.Run(() => HandleClientLoopAsync(clientId, client), _cts.Token);
+          OnChannelClientConnected?.Invoke(this, clientInfo);
+          _ = Task.Run(() => HandleClientLoopAsync(clientInfo, client), _cts.Token);
         }
       }
       catch (OperationCanceledException) { }
     }
 
-    private async Task HandleClientLoopAsync(Guid clientId, TcpClient client)
+    private async Task HandleClientLoopAsync(ClientInfo clientInfo, TcpClient client)
     {
       using var stream = client.GetStream();
       byte[] lengthBuffer = new byte[4];
@@ -70,7 +71,7 @@ namespace operation_vote.Server.Network
             break;
           }
 
-          OnChannelDataReceived?.Invoke(this, (clientId, packetBuffer));
+          OnChannelDataReceived?.Invoke(this, (clientInfo, packetBuffer));
         }
       }
       catch (Exception ex)
@@ -79,17 +80,17 @@ namespace operation_vote.Server.Network
       }
       finally
       {
-        _clients.TryRemove(clientId, out _);
+        _clients.TryRemove(clientInfo, out _);
         client.Close();
-        OnChannelClientDisconnected?.Invoke(this, (clientId, reason));
+        OnChannelClientDisconnected?.Invoke(this, (clientInfo, reason));
       }
     }
 
-    public async Task SendToClientAsync(Guid clientId, byte[] data)
+    public async Task SendToClientAsync(ClientInfo client, byte[] data)
     {
-      if (_clients.TryGetValue(clientId, out var client) && client.Connected)
+      if (_clients.TryGetValue(client, out var tcpClient) && tcpClient.Connected)
       {
-        var stream = client.GetStream();
+        var stream = tcpClient.GetStream();
         byte[] lengthHeader = BitConverter.GetBytes(data.Length);
 
         // FIX: Convert from native system architecture to Big-Endian network byte order

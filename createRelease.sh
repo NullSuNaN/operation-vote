@@ -1,5 +1,5 @@
  #! /usr/bin/env bash
-unset ver filter dict tgList tgDict _tgList thread_limit i system proj_type dict_proj output err failed
+unset ver filter dict tgList tgDict _tgList thread_limit i system proj_type dict_proj output err failed failedTasks
 [ "$#" -lt 1 ] && {
   echo 'Usage: createReleaseBundle.sh <version> [<filter:regex>:.*]'
   exit 2
@@ -83,7 +83,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         echo "Building Done: $proj_type-$system"
         mkdir -p "$dict_proj/bin"
         trap 'rm -rf "./$dict_proj";echo -n " " >&3;exit 130' SIGINT
-        dotnet publish -r "$system" --output "$dict_proj/bin" -p:Version="$ver" -- "$proj_type" || err "Failed to build $proj_type-$system"$'\n'
+        dotnet publish -r "$system" --output "$dict_proj/bin" -p:Version="$ver" -- "$proj_type" || err "$proj_type-$system: Failed to build $proj_type-$system"$'\n'
         [ "${system%%-*}" == win ] && echo $'@echo off\nbin\\'"$proj_type"$'.exe %*\npause' > "$dict_proj/$proj_type.bat"
         [ "${system%%-*}" == linux ] && {
           echo 'bin/'"$proj_type"' "$@"' > "$dict_proj/$proj_type"
@@ -113,7 +113,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         echo "Building Done: $proj_type-$system"
         mkdir -p "$dict_proj/bin"
         trap 'rm -rf "./$dict_proj";echo -n " " >&3;exit 130' SIGINT
-        dotnet publish -r "$system" --output "$dict_proj/bin" -p:Version="$ver" -- "$proj_type" || err "Failed to build $proj_type-$system"$'\n'
+        dotnet publish -r "$system" --output "$dict_proj/bin" -p:Version="$ver" -- "$proj_type" || err "$proj_type-$system: Failed to build $proj_type-$system"$'\n'
         [ "${system%%-*}" == win ] && echo $'@echo off\nbin\\'"$proj_type"$'.exe %*\npause' > "$dict_proj/$proj_type.bat"
         [ "${system%%-*}" == linux ] && {
           echo 'bin/'"$proj_type"' "$@"' > "$dict_proj/$proj_type"
@@ -142,7 +142,7 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
         echo "Building Done: $proj_type-$system"
         mkdir -p "$dict_proj/wwwroot"
         trap 'rm -rf "./$dict_proj";echo -n " " >&3;exit 130' SIGINT
-        dotnet publish "$proj_type/" -c Release -o "$dict_proj/app" -p:Version="$ver" || err "Failed to build $proj_type-$system"$'\n'
+        dotnet publish "$proj_type/" -c Release -o "$dict_proj/app" -p:Version="$ver" || err "$proj_type-$system: Failed to build $proj_type-$system"$'\n'
         cp -r "$proj_type/wwwroot" "$dict_proj/"
         [ "${system%%-*}" == win ] && {
           echo $'@echo off\ndotnet serve -d:app\wwwroot %*' > "$dict_proj/$proj_type.bat"
@@ -167,8 +167,9 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
   } &
 done
 failed=0
+failedTasks=()
 while true;do
-  [ "$(jobs -pr)" == '' ] && {
+  [ "$(jobs -pr)" == '' ] && [ "$failed" == 0 ] && {
     echo $'\e[34mRelease is fully created.\e[0m'
     exit
   }
@@ -177,7 +178,13 @@ while true;do
     echo -n $'\e[31m'"$err"$'\e[0m'
     echo 'Press Enter to abort building.'
     failed=1
+    failedTasks[${#failedTasks[@]}]="${err%%:*}"
   }
-  [ "$failed" == 1 ] && read -r -t 0.1 -d $'\n' && exit 1
+  [ "$failed" == 1 ] && read -r -t 0.1 -d $'\n' && {
+    echo 'Failed Tasks:'
+    listArr "${failedTasks[@]}"
+    echo
+    exit 1
+  }
   echo -n " " >&4
 done

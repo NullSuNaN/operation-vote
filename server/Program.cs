@@ -1,7 +1,7 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
+using operation_vote.Interface.Shared;
 using operation_vote.Server;
 using operation_vote.Server.Network;
 
@@ -30,21 +30,39 @@ namespace operation_vote.Interface.Server
   {
     private static long _idCounter = 0;
     public static long NewId => Interlocked.Increment(ref _idCounter);
-    public static async Task Main(string[] args)
+    public static UserDatabase userDB = null!;
+    public static async Task<int> Main(string[] args)
     {
-      string configPath = Path.Combine(AppContext.BaseDirectory, args.FirstOrDefault("config.json"));
+      userDB=[];
+      string? first = args.FirstOrDefault((string?)null);
+      string configFile = first ?? "config.json";
+      if(first?.StartsWith("--") ?? false)
+      {
+        if(first.Length == 2)
+          configFile = args.ElementAtOrDefault(1) ?? "config.json";
+        else if (first == "--manager")
+        {
+          UserDatabase.RunConsoleManager();
+          return 0;
+        }
+        else
+        {
+          return 1;
+        }
+      }
+      string configPath = Path.Combine(AppContext.BaseDirectory, first ?? "config.json");
 
       if (!File.Exists(configPath))
       {
         Console.ForegroundColor = ConsoleColor.Red;
         ServerLogger.logger.LogInformation(()=>$"[Fatal Error] Configuration layout target missing at: {configPath}");
         Console.ResetColor();
-        return;
+        return 0;
       }
 
       try
       {
-        ServerLogger.logger.LogInformation(()=>"=== INITIALIZING MULTI-PROTOCOL HYBRID VOTING ENGINE ===");
+        ServerLogger.logger.LogInformation(()=>"=== INITIALIZING ===");
         ServerLogger.logger.LogInformation(()=>$"Loading configuration rules from: {configPath}");
 
         string jsonText = await File.ReadAllTextAsync(configPath);
@@ -53,7 +71,7 @@ namespace operation_vote.Interface.Server
         if (config == null || config.Network == null || config.Profiles == null)
         {
           ServerLogger.logger.LogInformation(()=>"[Error] Serialization failed: Root metadata target fields are null.");
-          return;
+          return 0;
         }
 
         await RunServerWithConfigAsync(config);
@@ -68,6 +86,7 @@ namespace operation_vote.Interface.Server
         }
         Console.ResetColor();
       }
+      return 0;
     }
 
     private static async Task RunServerWithConfigAsync(ServerAppConfig config)
@@ -130,7 +149,7 @@ namespace operation_vote.Interface.Server
             ServerLogger.logger.LogError(()=>$"Failed to parse AFK time limit for {profile.Name}: {profile.AfkLimit}");
           }
         }
-        byte[] packedBytes = PackKeysToBinary(profile.Keys, afkSpan);
+        byte[] packedBytes = InstructionsProtocol.SerializeInstructions(profile.Keys, afkSpan);
         Operation.OperationType newType = new(packedBytes, targetId);
 
         operationalSuite.Add(newType);
@@ -139,11 +158,15 @@ namespace operation_vote.Interface.Server
         ServerLogger.logger.LogInformation(()=>$"[Configured Profile] {profile.Name} bound to key hooks: [{string.Join(", ", profile.Keys)}]");
       }
 
-      var server = new VotingServer(transportCluster, operationalSuite);
+      var server = new VotingServer(transportCluster, operationalSuite, userDB)
+      {
+        Users = userDB
+      };
 
       server.OnClientConnected += (sender, clientId) => ServerLogger.logger.LogDebug(()=>$"[Cluster Joined] Client ID: {clientId}");
       server.OnClientHandshakeCompleted += (sender, clientId) => ServerLogger.logger.LogDebug(()=>$"[Handshake Verified] Client {clientId} initialized successfully.");
       server.OnClientDisconnected += (sender, e) => ServerLogger.logger.LogDebug(()=>$"[Cluster Left] Client ID: {e.ClientId}. Reason: {e.Reason}");
+      server.OnClientAuthorized += (sender, e) => ServerLogger.logger.LogDebug(()=>$"[Authorizing] Client ID: {e.Client}. User: {e.User.Name}");
 
       var voteManager = new VotingManager(server);
       voteManager.OnOperationCountChanged += (sender, data) =>
@@ -161,38 +184,59 @@ namespace operation_vote.Interface.Server
       var serverTask = server.StartAsync();
 
       Console.ForegroundColor = ConsoleColor.Cyan;
-      Console.WriteLine($"\nServer active. Hosting TCP ({config.Network.TcpPort}) and WebSockets ({sanitizedWsPrefix}) layers...");
+      Console.WriteLine($"\nServer active. Hosting TCP ({config.Network.TcpHost}:{config.Network.TcpPort}) and WebSockets ({sanitizedWsPrefix}) layers...");
       Console.ResetColor();
-      Console.WriteLine("Press [ENTER] to shut down the server...\n");
-      Console.ReadLine();
+
+      bool readContinue = true;
+      while(readContinue){
+        string line = Console.ReadLine() ?? "";
+        string[] command = line.Split(' ', StringSplitOptions.None);
+        switch (command.FirstOrDefault(""))
+        {
+          case "":
+            Console.WriteLine("you can use `help` to get help.");
+            break;
+          case "manager":
+            UserDatabase.RunConsoleManager(userDB);
+            break;
+          case "exit":
+            readContinue = false;
+            break;
+          case "loglvl":
+            switch (command.ElementAtOrDefault(1))
+            {
+              case "debug":
+                ServerLogger.CurrentLogLevel = LogLevel.Debug;
+                break;
+              case "information":
+                ServerLogger.CurrentLogLevel = LogLevel.Information;
+                break;
+              case "warning":
+                ServerLogger.CurrentLogLevel = LogLevel.Warning;
+                break;
+              case "error":
+                ServerLogger.CurrentLogLevel = LogLevel.Error;
+                break;
+            }
+            break;
+          case "help":
+            Console.WriteLine("exit           - shut down the server");
+            Console.WriteLine("help           - get help");
+            Console.WriteLine("loglvl <level> - set log level to:");
+            Console.WriteLine("  debug/information/warning/error");
+            Console.WriteLine("manager        - open user manager");
+            break;
+          default:
+            Console.WriteLine($"Invalid command: {command}, you can use `help` to get help.");
+            break;
+        }
+      }
 
       Console.WriteLine("Broadcasting closing frames and wrapping up operations...");
       await server.BroadcastShutdownSignalAsync();
       server.Stop();
       await serverTask;
       Console.WriteLine("Server is closed.");
-    }
-
-    private static byte[] PackKeysToBinary(string[] keys, TimeSpan? afk)
-    {
-      using var ms = new MemoryStream();
-      using (var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
-      {
-        writer.Write("V1.2");
-        writer.Write("keys:");
-        writer.Write7BitEncodedInt64(keys.LongLength);
-        foreach (var str in keys)
-        {
-          writer.Write(str);
-        }
-        if(afk != null)
-        {
-          writer.Write("afk:");
-          Console.WriteLine($"Sent afk: {afk.Value}");
-          writer.Write((double)afk.Value.TotalMilliseconds);
-        }
-      }
-      return ms.ToArray();
     }
   }
 }

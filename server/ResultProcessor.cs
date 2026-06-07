@@ -73,14 +73,14 @@ namespace operation_vote.Interface.Server
       if (!_keyStateCache.TryGetValue(stateKey, out bool lastState))
       {
         _keyStateCache[stateKey] = currentState;
-        TriggerKeyAction(rule, currentState, rate);
+        TriggerKeyAction(rule, currentState, (voters, supporters, rate));
         return;
       }
 
       if (currentState != lastState)
       {
         _keyStateCache[stateKey] = currentState;
-        TriggerKeyAction(rule, currentState, rate);
+        TriggerKeyAction(rule, currentState, (voters, supporters, rate));
       }
     }
     private static bool CheckRule<T>(T value, T? requirement) where T : struct, INumber<T>
@@ -112,11 +112,11 @@ namespace operation_vote.Interface.Server
       }
     }
 
-    private static void TriggerKeyAction(PressKeyResultConfig rule, bool action, double currentRate)
+    private static void TriggerKeyAction(PressKeyResultConfig rule, bool action, (int Voters, int Supporters, double Rate) stat)
     {
       // Triggers exclusively on state flips: "Hold ' '" or "Release ' '"
       Console.ForegroundColor = action ? ConsoleColor.Green : ConsoleColor.Yellow;
-      ServerLogger.logger.LogInformation(()=>$"[Key Action] {action} Key: '{rule.Key}' (Support Rate: {currentRate:P1})");
+      ServerLogger.logger.LogInformation(()=>$"[Key Action] {action} Key: '{rule.Key}' ({stat.Supporters}/{stat.Voters}, {stat.Rate:P2})");
       Console.ResetColor();
 
       bool isKeyDown = action;

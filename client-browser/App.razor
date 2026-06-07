@@ -3,14 +3,15 @@
 @using System.Net
 @using System.Text
 @using System.Threading
-@using System.Diagnostics
 @using Microsoft.AspNetCore.Components.Web
+@using Microsoft.JSInterop
 @using operation_vote.Client
 @using operation_vote.Client.Request
 @using operation_vote.Shared
 
 @implements IDisposable
 @inject NavigationManager navigationManager
+@inject IJSRuntime JsRuntime
 
 @if (!_isOperational)
 {
@@ -20,11 +21,23 @@
       <p>Specify the target infrastructure address below:</p>
 
       <div class="form-group">
-        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/"
-               @onkeypress="HandleConnectKeyPairSubmit" disabled="@_isConnecting" />
-        @if(navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)){
-          <small>Connecting to ws://(instead of wss://) servers in this https:// page may fail and silently crash the app.</small>
-        }
+          <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/"
+                @onkeypress="HandleConnectKeyPairSubmit" disabled="@_isConnecting" />
+          @if(navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)){
+            <small>Connecting to ws://(instead of wss://) servers in this https:// page may fail and silently crash the app.</small>
+          }
+        <div class="form-group" @ref="LoginFields">
+          <input type="text" @ref="UsernameField" @bind="Username" class="input-field" placeholder="Username" disabled="@_isConnecting" />
+          <div class="form-item">
+            <input type="password" @ref="PasswordField" @bind="Password" class="input-field" placeholder="Password" disabled="@_isConnecting" />
+            <input type="checkbox" checked="@HidePassword" @onchange="OHandlePasswordVisibilityChange" class="checkbox-field" id="hide-password" disabled="@_isConnecting" />
+            <label for="hide-password">Hide</label>
+          </div>
+        </div>
+        <div class="form-item">
+          <input type="checkbox" checked="@UseAnonymous" @onchange="OHandleUseAnonymousChange" class="checkbox-field" id="use-anonymous" disabled="@_isConnecting" />
+          <label for="use-anonymous">Anonymous</label>
+        </div>
       </div>
 
       @if (!string.IsNullOrEmpty(_errorMessage))
@@ -111,6 +124,13 @@ else
   private int CurrentStep { get; set; } = 0;
 
   private string ServerUri { get; set; } = "ws://192.168.1.2:9056/";
+  private string Username { get; set; } = "";
+  private string Password { get; set; } = "";
+  private ElementReference UsernameField;
+  private ElementReference PasswordField;
+  private ElementReference LoginFields;
+  private bool UseAnonymous { get; set; } = false;
+  private bool HidePassword { get; set; } = true;
   private string StatusTitle { get; set; } = "Initializing System";
   private string StatusMessage = "Synchronizing operational maps...";
   private string StatusClass = "ready";
@@ -132,7 +152,10 @@ else
     {
       _cts = new CancellationTokenSource();
       _wsHandler = new SocketRequestHandlerWS();
-      _client = new VotingClient<SocketRequestHandlerWS>(_wsHandler, ServerUri, _cts.Token);
+      _client = new VotingClient<SocketRequestHandlerWS>(_wsHandler, ServerUri, _cts.Token)
+        {
+          authenticationData = UseAnonymous ? null : new(Username, Password)
+        };
 
       _client.OnDisconnect += HandleClientDisconnect;
 
@@ -532,12 +555,22 @@ actualFailureDetail.Contains("ObjectDisposed"))
       finally {};
     }
   }
-  // @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
-  //     @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
+  public async Task HandlePasswordVisibilityChange(ChangeEventArgs e)
+  {
+    HidePassword=(bool?)e.Value ?? false;
+    await JsRuntime.InvokeVoidAsync("window.helpers.setAttribute", PasswordField, "type", HidePassword ? "password" : "text").AsTask();
+  }
+  public async Task HandleUseAnonymousChange(ChangeEventArgs e){
+    UseAnonymous=(bool?)e.Value ?? false;
+    await JsRuntime.InvokeVoidAsync("window.helpers.setVisibility", LoginFields, !UseAnonymous).AsTask();
+  }
+  public Task OHandleInputPassword(TouchEventArgs e) => EventWrapper(HandleTouchEnd(e));
   public Task OHandleKeyDown(KeyboardEventArgs e) => EventWrapper(HandleKeyDown(e));
   public Task OHandleKeyUp(KeyboardEventArgs e) => EventWrapper(HandleKeyUp(e));
   public Task OHandleMouseDown(MouseEventArgs e) => EventWrapper(HandleMouseDown(e));
   public Task OHandleMouseUp(MouseEventArgs e) => EventWrapper(HandleMouseUp(e));
   public Task OHandleTouchStart(TouchEventArgs e) => EventWrapper(HandleTouchStart(e));
   public Task OHandleTouchEnd(TouchEventArgs e) => EventWrapper(HandleTouchEnd(e));
+  public Task OHandlePasswordVisibilityChange(ChangeEventArgs e) => EventWrapper(HandlePasswordVisibilityChange(e));
+  public Task OHandleUseAnonymousChange(ChangeEventArgs e) => EventWrapper(HandleUseAnonymousChange(e));
 }

@@ -2,17 +2,16 @@ using Microsoft.Extensions.Logging;
 
 namespace operation_vote.Interface.Server
 {
-  public class ServerLogger
+  public static class ServerLogger
   {
+    public static LogLevel CurrentLogLevel { get; set; } = LogLevel.Information;
     private static readonly ILoggerFactory factory = LoggerFactory.Create(builder =>
       {
         builder.AddConsole(); // Output to standard console windows
         builder.AddDebug();   // Output to the IDE debugging pipeline
-        builder.SetMinimumLevel(LogLevel.Information);
+        builder.AddFilter((provider, category, level) => level >= CurrentLogLevel);
       });
-    private ServerLogger() { }
     internal static readonly ILogger<Program> logger = factory.CreateLogger<Program>();
-    public readonly static ServerLogger Instance = new();
   }
   public static class LoggerExtensions
   {

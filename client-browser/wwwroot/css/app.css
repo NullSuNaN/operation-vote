@@ -173,4 +173,18 @@ html, body {
 .form-group {
     display: flex;
     flex-direction: column;
+    gap: 5px;
+    align-items: start;
+}
+:not(.form-group)>.form-group {
+    margin-left: 5px;
+}
+.form-item {
+    display: flex;
+    gap: 2px;
+    align-items: start;
+}
+
+.input-field {
+    width: fit-content;
 }

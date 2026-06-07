@@ -69,26 +69,56 @@ namespace operation_vote.Client
       _stateBytes = stateBytes ?? throw new ArgumentNullException(nameof(stateBytes));
     }
 
-    public byte[] ToByteArray()
+    /// <summary>
+    /// Factory helper to build a Server-Side Operation domain model from client wire payload bytes.
+    /// </summary>
+    public static Operation? Deserialize(BinaryReader reader, List<OperationType> opList)
     {
-      using var ms = new MemoryStream();
-      using var writer = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true);
+      // 1. Read the inner OperationType structural components
+      long typeId = reader.ReadInt64();
+      if(typeId <= 0 || typeId > opList.Count)
+      {
+        return null;
+      }
+      var type = opList.ElementAt((Index)(int)(typeId-1));
 
+      // 2. Read the state context fields matching client serialization layout
+      VoteType voteType = (VoteType)reader.ReadByte();
+      int stateLength = reader.ReadInt32();
+      byte[] stateBytes = reader.ReadBytes(stateLength);
+
+      return new Operation(type, voteType, stateBytes);
+    }
+    public static Operation? Deserialize(byte[] bytes, List<OperationType> opList)
+    {
+      using var ms = new MemoryStream(bytes);
+      using var reader = new BinaryReader(ms, Encoding.UTF8);
+      return Deserialize(reader, opList);
+    }
+
+    /// <summary>
+    /// Serializes the server's processed operation back to binary format and write it to a BinaryWriter.
+    /// </summary>
+    public void Serialize(BinaryWriter writer)
+    {
+      // 1. Write the Type parameters
       writer.Write(Type.Id);
-      writer.Write((byte)VoteType);
 
-      _stateLock.EnterReadLock();
-      try
-      {
-        writer.Write(_stateBytes.Length);
-        writer.Write(_stateBytes);
-      }
-      finally
-      {
-        _stateLock.ExitReadLock();
-      }
+      // 2. Write the structural instance metadata (Fixing the client alignment mismatch)
+      writer.Write((byte)VoteType);
+      writer.Write(StateBytes.Length);
+      writer.Write(StateBytes);
 
       writer.Flush();
+    }
+    /// <summary>
+    /// Serializes the server's processed operation back to binary format.
+    /// </summary>
+    public byte[] Serialize()
+    {
+      using var ms = new MemoryStream();
+      using var writer = new BinaryWriter(ms, Encoding.UTF8);
+      Serialize(writer);
       return ms.ToArray();
     }
 
