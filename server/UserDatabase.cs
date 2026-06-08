@@ -1,16 +1,18 @@
-using System;
 using System.Collections;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using Microsoft.Data.Sqlite;
 using operation_vote.Server;
 
 namespace operation_vote.Interface.Server
 {
+  /// <summary>
+  /// A user database.
+  /// Anonymous is stored separately and cannot be access with <see cref="IDictionary"> methods.
+  /// </summary>
   public class UserDatabase : IUserContainer, IDisposable
   {
     private readonly SqliteConnection _connection;
-    private const string ConnectionString = "Data Source=users.db;";
+    private const string ConnectionString = "Data Source=users.db;Pooling=False;";
 
     // High-performance ConcurrentDictionary guarantees thread safety across concurrent connection tasks
     private readonly ConcurrentDictionary<string, User> _cache = new(StringComparer.OrdinalIgnoreCase);
@@ -65,14 +67,34 @@ namespace operation_vote.Interface.Server
       while (reader.Read())
       {
         var user = new User(reader.GetString(0), reader.GetString(1), reader.GetInt32(2));
+        RegisterUserMonitor(user);
         _cache[user.Name] = user;
         OnUserRegistered?.Invoke(this, user);
       }
     }
 
+    private void HandleUserPropertyChange<T>(object? sender, (T Original, T New) e)
+    {
+      User? user = (User?)sender;
+      if(user!=null && TryGetValue(user.Name, out var _user) && ReferenceEquals(user, _user))
+      {
+        SqlUpsert(user);
+      }
+    }
+    private void RegisterUserMonitor(User user)
+    {
+      user.OnApiKeyChange += HandleUserPropertyChange;
+      user.OnVoteMultiplierChange += HandleUserPropertyChange;
+    }
+    private void UnregisterUserMonitor(User user)
+    {
+      user.OnApiKeyChange -= HandleUserPropertyChange;
+      user.OnVoteMultiplierChange -= HandleUserPropertyChange;
+    }
+
     public void UpdateAnonymousUser(int voteMultiplier)
     {
-      AnonymousUser.Set("Anonymous", "42", voteMultiplier);
+      AnonymousUser.Set("42", voteMultiplier);
       SaveSetting("AnonymousVoteMultiplier", voteMultiplier.ToString());
     }
 
@@ -144,6 +166,7 @@ namespace operation_vote.Interface.Server
         });
         if (isAdd)
         {
+          RegisterUserMonitor(user);
           OnUserRegistered?.Invoke(this, value);
         }
       }
@@ -161,6 +184,7 @@ namespace operation_vote.Interface.Server
 
       if (_cache.TryAdd(key, value))
       {
+        RegisterUserMonitor(value);
         SqlUpsert(value);
         OnUserRegistered?.Invoke(this, value);
       }
@@ -172,13 +196,14 @@ namespace operation_vote.Interface.Server
 
     public bool ContainsKey(string key)
     {
-      return key == AnonymousUser.Name || _cache.ContainsKey(key);
+      return _cache.ContainsKey(key);
     }
 
     public bool Remove(string key)
     {
       if (_cache.TryRemove(key, out var user))
       {
+        UnregisterUserMonitor(user);
         SqlDelete(key);
         OnUserDeleted?.Invoke(this, user);
         return true;
@@ -198,14 +223,13 @@ namespace operation_vote.Interface.Server
       using var command = new SqliteCommand("DELETE FROM Users;", _connection);
       command.ExecuteNonQuery();
 
-      // Take a thread-safe snapshot to evict records securely under concurrent access profiles
-      var cachedSnapshot = _cache.ToArray();
-      _cache.Clear();
-
-      foreach (var item in cachedSnapshot)
+      foreach (var item in _cache)
       {
+        UnregisterUserMonitor(item.Value);
         OnUserDeleted?.Invoke(this, item.Value);
       }
+      _cache.Clear();
+
     }
 
     public bool Contains(KeyValuePair<string, User> item)
@@ -362,7 +386,7 @@ namespace operation_vote.Interface.Server
         {
           if (db.TryGetValue(username, out User? user))
           {
-            user.Set(Name: username, ApiKey: apiKey, VoteMultiplier: multiplier);
+            user.Set(ApiKey: apiKey, VoteMultiplier: multiplier);
           }
           else
           {
@@ -382,7 +406,7 @@ namespace operation_vote.Interface.Server
         if (!int.TryParse(Console.ReadLine(), out int multiplier)) multiplier = 1;
 
         db.UpdateAnonymousUser(multiplier);
-        Console.WriteLine("Isolated field properties successfully reassigned.");
+        Console.WriteLine("Anonymous user property successfully reassigned.");
       }
 
       private static void DeleteUser(UserDatabase db)

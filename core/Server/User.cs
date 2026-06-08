@@ -5,7 +5,7 @@ namespace operation_vote.Server
   public class User(string Name, string ApiKey = "42", int VoteMultiplier = 1)
   {
     
-    private string name = Name;
+    private readonly string name = Name;
     private string apiKey = ApiKey;
     private int voteMultiplier = VoteMultiplier;
     // private int maxInstances = int.MaxValue;
@@ -36,13 +36,13 @@ namespace operation_vote.Server
         infoLock.ExitWriteLock();
       }
     }
-    public string Name {
-      get => GetProperty(ref name);
-      set => SetProperty(ref name, value);
-    }
+    public string Name => name;
     public string ApiKey {
       get => GetProperty(ref apiKey);
-      set => SetProperty(ref apiKey, value);
+      set {
+        string original = SetProperty(ref apiKey, value);
+        OnApiKeyChange?.Invoke(this, (original, value));
+      }
     }
     public int VoteMultiplier {
       get => GetProperty(ref voteMultiplier);
@@ -55,13 +55,12 @@ namespace operation_vote.Server
     //   get => GetProperty(ref maxInstances);
     //   set => SetProperty(ref maxInstances, value);
     // }
-    public void Set(string Name, string ApiKey, int VoteMultiplier)
+    public void Set(string ApiKey, int VoteMultiplier)
     {
       int originalMultiplier=0;
       infoLock.EnterWriteLock();
       try
       {
-        name=Name;
         apiKey=ApiKey;
         originalMultiplier = voteMultiplier;
         voteMultiplier=VoteMultiplier;
@@ -73,6 +72,7 @@ namespace operation_vote.Server
       }
     }
     public event EventHandler<(int Original, int New)>? OnVoteMultiplierChange;
+    public event EventHandler<(string Original, string New)>? OnApiKeyChange;
     public readonly ConcurrentDictionary<ClientInfo, object?> ConnectedClients = [];
   };
 }

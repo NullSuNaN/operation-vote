@@ -188,3 +188,21 @@ html, body {
 .input-field {
     width: fit-content;
 }
+
+.hidden-field {
+    position: absolute;
+    left: -999999px;
+    width: 1px;
+    height: 1px;
+    min-width: 0;
+    min-height: 0;
+    border: none;
+    margin: 0;
+    padding: 0;
+    background-color: inherit;
+    color: transparent;
+    opacity: 0.1;
+    overflow: hidden;
+    pointer-events: none;
+    user-select: none;
+}

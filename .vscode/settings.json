@@ -10,9 +10,11 @@
     "onchange",
     "onclick",
     "oncontextmenu",
+    "onfocus",
     "oninput",
     "onmousedown",
     "onmouseup",
+    "onsubmit",
     "ontouchend",
     "ontouchstart",
     "RESULTPROCESSOR",
@@ -20,6 +22,7 @@
     "Spacebar",
     "tabindex",
     "Tmds",
+    "WLAN",
     "wwwroot"
   ]
 }

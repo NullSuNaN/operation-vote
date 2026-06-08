@@ -8,7 +8,23 @@ You can make your own servers and clients with the `core/` stuff.
 
 The `client-window`, `client-browser`, `server` are all just an implementation to process generic voting.
 
-If the server port is not open for WLAN, you need to use `0.0.0.0` or your WLAN IP as the host
+If the server port is not open for WLAN, you need to use `0.0.0.0` or your WLAN IP as the host.
+
+## Authentication
+
+There is an anonymous user by default, which can be configured to be disabled(vote does not count) by the server.
+
+You can change the multiplier of each account while keeping the server on.
+
+Every user have a username and a password, they both have no limitations on the characters and is *CASE SENSITIVE*.
+
+You can only login with your client, and only the server host can register.
+
+The protocol allows the client to change account mid-connection, but currently cannot change back to Anonymous and it is not implemented to the clients.
+
+The account with the name `Anonymous` is separate from the default Anonymous user.
+
+The users on the server-side is stored in `users.db`.
 
 ## Examples
 
@@ -16,10 +32,11 @@ If the server port is not open for WLAN, you need to use `0.0.0.0` or your WLAN 
 ```bash
 server # uses config.json
 server gd.json # uses gd.json
-dotnet serve -ddist/wwwroot -p8080 -a 0.0.0.0 # serve the browser client, require dotnet-serve
+dotnet serve -d:dist/wwwroot -p8080 -a 0.0.0.0 # serve the browser client, require dotnet-serve
 client-window localhost:9055 # connect to localhost:9055 with raw TCP
 client-window localhost:9055 ws # connect to localhost:9055 with WS
-client-window localhost:9055 wss # connect to localhost:9055 with WSS
+client-window localhost:9055 wss NullSuNaN 123456 # connect to localhost:9055 with WS and attempt to login as NullSuNaN
+                                                  # continue as Anonymous if the login failed
 ```
 + Server Configuration
 ```json
