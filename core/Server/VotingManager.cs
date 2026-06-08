@@ -73,6 +73,7 @@ namespace operation_vote.Server
         {
           user.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
         }
+        dict.AnonymousUser.OnVoteMultiplierChange += HandleUserVoteMultiplierChange; // Anonymous is a separate field
       });
     }
 
