@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
+using System.Net;
 using System.Text;
 using operation_vote.Client.Request;
+using operation_vote.Shared;
 
 namespace operation_vote.Client
 {
@@ -17,6 +19,7 @@ namespace operation_vote.Client
 
 		private const int RECONNECT_LIMIT = 3;
 		private int _reconnectAttempts;
+		private int _isReconnecting; // 0 = false, 1 = true for atomic thread-safety
 		private int _isDisposedState; // 0 = false, 1 = true for atomic thread-safety
 		public bool Disconnected => Volatile.Read(ref _isDisposedState) == 1;
 
@@ -45,8 +48,22 @@ namespace operation_vote.Client
 		public readonly CancellationToken CancellationToken;
 		public readonly VotingEnv Env = new();
 		public ReadOnlyDictionary<long, Operation.OperationType> OperationTypes => _operationTypes.AsReadOnly();
+		public AuthenticationClient.AuthenticationData? authenticationData = null;
 
 		public event EventHandler<(T, string)>? OnDisconnect;
+		public event EventHandler<bool>? OnAuthorizationFinished;
+		private volatile int voteMultiplierCache = ProtocolInfo.ClientDefaultVoteMultiplier;
+		public int VoteMultiplier => voteMultiplierCache;
+		private volatile string? user = null;
+		public string? User => user;
+
+		public event EventHandler<(int Original, int New)>? OnVoteMultiplierChange;
+		/// <summary>
+		/// Triggered both when authorization successes(before <see cref="OnAuthorizationFinished"/>) and the server forces to change the user.
+		/// </summary>
+		public event EventHandler<string?>? OnUserChanged;
+		private TaskCompletionSource<string> AuthenticationFetchToken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		private TaskCompletionSource<bool> AuthenticationResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
 		public VotingClient(T socketRequestHandler, string uri, CancellationToken token = default)
 		{
@@ -79,10 +96,14 @@ namespace operation_vote.Client
 				// Start inbound listener processing pathway
 				_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
 
-				// --- STEP 1: Pack and transmit Bit 1 + 'INIT' Handshake Frame ---
-				byte[] initTextBytes = Encoding.UTF8.GetBytes("INIT");
-				byte[] initPacket = PackBitStream(1, initTextBytes);
-				await SocketRequestHandler.SendAsync(initPacket, CancellationToken).ConfigureAwait(false);
+				{ // Initialize connection
+					using var ms = new MemoryStream();
+					using var writer = new BinaryWriter(ms, Encoding.UTF8);
+
+					writer.Write(true);
+					writer.Write(ProtocolInfo.ClientCommands.InitializeCommand);
+					await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
+				}
 
 				// Wait for the server data arrival to execute version checks
 				bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
@@ -91,6 +112,53 @@ namespace operation_vote.Client
 					await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
 					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Failed to initialize the connection."));
 					Dispose();
+				}
+
+				// Authorize if the client is logged in
+				var _authenticationData = Volatile.Read(ref authenticationData);
+				if (_authenticationData != null)
+				{
+					AuthenticationFetchToken = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+					AuthenticationResult = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+					bool authSuccess = await AuthenticationClient.AuthenticateAsync(
+						Volatile.Read(ref _authenticationData),
+						async data =>
+						{
+							using var ms = new MemoryStream();
+							using var writer = new BinaryWriter(ms, Encoding.UTF8);
+							writer.Write(true);
+							writer.Write(ProtocolInfo.ClientCommands.AuthenticateRequestCommand);
+							writer.Flush();
+							await SocketRequestHandler.SendAsync(ms.ToArray());
+							return await AuthenticationFetchToken.Task;
+						},
+						async data =>
+						{
+							using var ms = new MemoryStream();
+							using var writer = new BinaryWriter(ms, Encoding.UTF8);
+							writer.Write(true);
+							writer.Write(ProtocolInfo.ClientCommands.AuthenticateResultCommand);
+							writer.Write7BitEncodedInt(data.Length);
+							writer.Write(data);
+							writer.Flush();
+							await SocketRequestHandler.SendAsync(ms.ToArray());
+							return await AuthenticationResult.Task;
+						}
+					);
+					if (authSuccess)
+					{
+						user = _authenticationData.Username;
+						OnUserChanged?.Invoke(this, _authenticationData.Username);
+					}
+					OnAuthorizationFinished?.Invoke(this, authSuccess);
+
+					{ // Establish Voting
+						using var ms = new MemoryStream();
+						using var writer = new BinaryWriter(ms, Encoding.UTF8);
+						writer.Write(true);
+						writer.Write(ProtocolInfo.ClientCommands.RegisterInstanceCommand);
+						await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
+					}
 				}
 			}
 			catch
@@ -110,141 +178,179 @@ namespace operation_vote.Client
 
 			_pendingOperations[operation.Id] = operation;
 
-			byte[] rawOperationBytes = operation.ToByteArray();
-			byte[] fullPacket = PackBitStream(0, rawOperationBytes);
+			using var ms = new MemoryStream();
+			using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
-			await SocketRequestHandler.SendAsync(fullPacket, token).ConfigureAwait(false);
+			writer.Write(false);
+			operation.Serialize(writer);
+
+			await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);
+			_pendingOperations.TryRemove(operation.Id, out _);
 		}
 
 		private async Task ReconnectLoopAsync()
 		{
 			if (Disconnected) return;
 
-			// Prevent simultaneous execution of connection lifecycle logic across parallel threads
-			await _connectionLock.WaitAsync(CancellationToken).ConfigureAwait(false);
+			// Prevent multiple reconnection loops from running simultaneously
+			if (Interlocked.Exchange(ref _isReconnecting, 1) == 1)
+				return;
+
 			try
 			{
-				if (Disconnected) return;
-
-				if (SocketRequestHandler.IsConnected)
+				// Prevent simultaneous execution of connection lifecycle logic across parallel threads
+				await _connectionLock.WaitAsync(CancellationToken).ConfigureAwait(false);
+				try
 				{
-					await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
-				}
-
-				string cleanUri;
-				lock (_uriLock) { cleanUri = _targetURI.TrimStart('+'); }
-
-				await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken).ConfigureAwait(false);
-
-				Interlocked.Exchange(ref _reconnectAttempts, 0);
-
-				// 1. Replay cached non-disposed operations safely across thread modifications
-				foreach (var pair in _pendingOperations)
-				{
-					if (pair.Value.IsDisposed)
+					while (!Disconnected && !CancellationToken.IsCancellationRequested)
 					{
-						_pendingOperations.TryRemove(pair.Key, out _);
-						continue;
+						try
+						{
+							if (SocketRequestHandler.IsConnected)
+							{
+								await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
+							}
+
+							string cleanUri;
+							lock (_uriLock) { cleanUri = _targetURI.TrimStart('+'); }
+
+							await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken).ConfigureAwait(false);
+
+							_handshakeCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+							// Start inbound listener processing pathway
+							_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
+
+							{ // Initialize connection
+								using var ms = new MemoryStream();
+								using var writer = new BinaryWriter(ms, Encoding.UTF8);
+
+								writer.Write(true);
+								writer.Write(ProtocolInfo.ClientCommands.InitializeCommand);
+								await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
+							}
+
+							// Wait for the server data arrival to execute version checks
+							bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
+							if (!initialized)
+							{
+								throw new InvalidOperationException("Failed to initialize the connection.");
+							}
+
+							// 1. Replay cached non-disposed operations safely across thread modifications
+							foreach (var pair in _pendingOperations)
+							{
+								if (pair.Value.IsDisposed)
+								{
+									_pendingOperations.TryRemove(pair.Key, out _);
+									continue;
+								}
+
+								using var opMs = new MemoryStream();
+								using var opWriter = new BinaryWriter(opMs, Encoding.UTF8);
+
+								opWriter.Write(false);
+								pair.Value.Serialize(opWriter);
+
+								await SocketRequestHandler.SendAsync(opMs.ToArray(), CancellationToken).ConfigureAwait(false);
+								_pendingOperations.TryRemove(pair.Key, out _);
+							}
+
+							//2. Re-authorize
+							var _authenticationData = Volatile.Read(ref authenticationData);
+							if (_authenticationData != null)
+							{
+								AuthenticationFetchToken = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+								AuthenticationResult = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+								bool authSuccess = await AuthenticationClient.AuthenticateAsync(
+									Volatile.Read(ref _authenticationData),
+									async data =>
+									{
+										using var ms = new MemoryStream();
+										using var writer = new BinaryWriter(ms, Encoding.UTF8);
+										writer.Write(true);
+										writer.Write(ProtocolInfo.ClientCommands.AuthenticateRequestCommand);
+										writer.Flush();
+										await SocketRequestHandler.SendAsync(ms.ToArray());
+										return await AuthenticationFetchToken.Task;
+									},
+									async data =>
+									{
+										using var ms = new MemoryStream();
+										using var writer = new BinaryWriter(ms, Encoding.UTF8);
+										writer.Write(true);
+										writer.Write(ProtocolInfo.ClientCommands.AuthenticateResultCommand);
+										writer.Write7BitEncodedInt(data.Length);
+										writer.Write(data);
+										writer.Flush();
+										await SocketRequestHandler.SendAsync(ms.ToArray());
+										return await AuthenticationResult.Task;
+									}
+								);
+								var originalUser = user;
+								if (authSuccess)
+								{
+									user = _authenticationData.Username;
+								}
+								else
+								{
+									user = null;
+								}
+								if (user != originalUser)
+									OnUserChanged?.Invoke(this, _authenticationData.Username);
+								OnAuthorizationFinished?.Invoke(this, authSuccess);
+							}
+							;
+							{ // 3. Re-send Handshake registration
+								using var ms = new MemoryStream();
+								using var writer = new BinaryWriter(ms, Encoding.UTF8);
+								writer.Write(true);
+								writer.Write(ProtocolInfo.ClientCommands.RegisterInstanceCommand);
+
+								await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
+							}
+
+							Interlocked.Exchange(ref _reconnectAttempts, 0);
+							break;
+						}
+						catch (Exception ex)
+						{
+							Console.WriteLine($"Reconnection attempt {Volatile.Read(ref _reconnectAttempts) + 1} failed: {ex.Message}");
+							if (Interlocked.Increment(ref _reconnectAttempts) >= RECONNECT_LIMIT)
+							{
+								OnDisconnect?.Invoke(this, (SocketRequestHandler, "Connection is interrupted."));
+								Dispose();
+								break;
+							}
+							// Wait 1 second before retrying
+							await Task.Delay(1000, CancellationToken).ConfigureAwait(false);
+						}
 					}
-
-					byte[] rawOpBytes = pair.Value.ToByteArray();
-					byte[] replayPacket = PackBitStream(0, rawOpBytes);
-
-					await SocketRequestHandler.SendAsync(replayPacket, CancellationToken).ConfigureAwait(false);
 				}
-
-				// 2. Re-send Handshake registration
-				byte[] regCmdBytes = Encoding.UTF8.GetBytes("REG");
-				byte[] registrationPacket = PackBitStream(1, regCmdBytes);
-
-				await SocketRequestHandler.SendAsync(registrationPacket, CancellationToken).ConfigureAwait(false);
-
-				_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
-			}
-			catch
-			{
-				if (Interlocked.Increment(ref _reconnectAttempts) >= RECONNECT_LIMIT)
+				finally
 				{
-					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Connection is interrupted."));
-					Dispose();
+					_connectionLock.Release();
 				}
 			}
 			finally
 			{
-				_connectionLock.Release();
+				Interlocked.Exchange(ref _isReconnecting, 0);
 			}
-		}
-
-		private static byte[] PackBitStream(byte startingBit, byte[] data)
-		{
-			int totalBits = 1 + (data.Length * 8);
-			int totalBytes = (totalBits + 7) / 8;
-			byte[] output = new byte[totalBytes];
-
-			if (startingBit == 1)
-			{
-				output[0] |= 0x80;
-			}
-
-			for (int i = 0; i < data.Length; i++)
-			{
-				int bitIndex = 1 + (i * 8);
-				int byteOffset = bitIndex / 8;
-				int shiftOffset = bitIndex % 8;
-
-				output[byteOffset] |= (byte)(data[i] >> shiftOffset);
-
-				if (byteOffset + 1 < output.Length)
-				{
-					output[byteOffset + 1] |= (byte)(data[i] << (8 - shiftOffset));
-				}
-			}
-
-			return output;
-		}
-
-		private static (byte Prefix, byte[] Payload) UnpackBitStream(byte[] data)
-		{
-			if (data == null || data.Length == 0) return (0, Array.Empty<byte>());
-
-			byte prefix = (byte)((data[0] & 0x80) >> 7);
-
-			int totalPayloadBits = (data.Length * 8) - 1;
-			int targetedBytesCount = (totalPayloadBits + 7) / 8; // Corrected ceiling division roundup
-
-			byte[] payload = new byte[targetedBytesCount];
-
-			for (int i = 0; i < payload.Length; i++)
-			{
-				byte currentPart = (byte)(data[i] << 1);
-				byte nextPart = (i + 1 < data.Length) ? (byte)((data[i + 1] & 0x80) >> 7) : (byte)0;
-				payload[i] = (byte)(currentPart | nextPart);
-			}
-
-			return (prefix, payload);
 		}
 
 		private void HandleIncomingData(object? sender, ReadOnlyMemory<byte> data)
 		{
 			if (Disconnected || data.Length == 0) return;
-
-			var (prefix, payload) = UnpackBitStream(data.ToArray());
-
-			if (prefix == 0)
+			using var ms = new MemoryStream(data.ToArray());
+			using var reader = new BinaryReader(ms, Encoding.UTF8);
+			string command = reader.ReadString();
+			switch (command)
 			{
-				// Handle payload data standard pathways down-stream
-			}
-			else if (prefix == 1)
-			{
-				if (payload.Length > 0 && (char)payload[0] == 'V')
-				{
+				case ProtocolInfo.ServerCommands.InitializeCommand:
 					try
 					{
-						using var ms = new MemoryStream(payload, 1, payload.Length - 1);
-						using var reader = new BinaryReader(ms, Encoding.UTF8);
-
 						string versionString = reader.ReadString();
-						if (versionString != "VOTE-1.1")
+						if (versionString != $"VOTE-{ProtocolInfo.Version}")
 						{
 							_handshakeCompletionSource?.TrySetResult(false);
 							return;
@@ -267,16 +373,40 @@ namespace operation_vote.Client
 					{
 						_handshakeCompletionSource?.TrySetResult(false);
 					}
-				}
-				else
-				{
-					string command = Encoding.UTF8.GetString(payload).TrimEnd('\0');
-					if (command == "END")
+					break;
+				case ProtocolInfo.ServerCommands.EndSessionCommand:
+					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Session ended normally."));
+					Dispose();
+					break;
+				case ProtocolInfo.ServerCommands.AuthenticateChallengeCommand:
+					AuthenticationFetchToken.TrySetResult(reader.ReadString());
+					break;
+				case ProtocolInfo.ServerCommands.AuthenticateResultCommand:
+					AuthenticationResult.TrySetResult(reader.ReadBoolean());
+					break;
+				case ProtocolInfo.ServerCommands.UpdateStatusCommand:
+					string stat = reader.ReadString();
+					Console.WriteLine($"Update status: {stat}");
+					switch (stat)
 					{
-						OnDisconnect?.Invoke(this, (SocketRequestHandler, "Session ended normally."));
-						Dispose();
+						case "MUL":
+							int multiplier = reader.Read7BitEncodedInt();
+							OnVoteMultiplierChange?.Invoke(this, (Interlocked.Exchange(ref voteMultiplierCache, multiplier), multiplier));
+							break;
+						case "ACO":
+							bool unauthorized = reader.ReadBoolean();
+							string? _user;
+							if (!unauthorized)
+								_user = reader.ReadString();
+							else
+								_user = null;
+							user = _user;
+							OnUserChanged?.Invoke(this, user);
+							break;
 					}
-				}
+					break;
+				default:
+					throw new ProtocolViolationException($"Invalid command: {command}");
 			}
 		}
 

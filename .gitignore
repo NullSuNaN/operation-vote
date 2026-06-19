@@ -24,6 +24,7 @@ bld/
 [Ll]ogs/
 dist/
 putToWin.sh
+server/users.db
 
 # .NET Core
 project.lock.json

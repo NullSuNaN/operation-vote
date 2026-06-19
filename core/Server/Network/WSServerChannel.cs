@@ -10,16 +10,16 @@ namespace operation_vote.Server.Network
   {
     private readonly HttpListener _listener;
     private readonly CancellationTokenSource _cts = new();
-    private readonly ConcurrentDictionary<Guid, WebSocket> _sockets = new();
+    private readonly ConcurrentDictionary<ClientInfo, WebSocket> _sockets = new();
 
     // Public CORS Rule Configurations
     public string AllowedOrigins { get; set; } = "*";
     public string AllowedMethods { get; set; } = "GET, POST, OPTIONS";
     public string AllowedHeaders { get; set; } = "Content-Type, Authorization";
 
-    public event EventHandler<Guid>? OnChannelClientConnected;
-    public event EventHandler<(Guid ClientId, string Reason)>? OnChannelClientDisconnected;
-    public event EventHandler<(Guid ClientId, byte[] Payload)>? OnChannelDataReceived;
+    public event EventHandler<ClientInfo>? OnChannelClientConnected;
+    public event EventHandler<(ClientInfo Client, string Reason)>? OnChannelClientDisconnected;
+    public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataReceived;
 
     public WSServerChannel(string prefixUri)
     {
@@ -27,7 +27,7 @@ namespace operation_vote.Server.Network
       _listener.Prefixes.Add(prefixUri); // Format: "http://127.0.0.1:9056/"
     }
 
-    public async Task StartAsync()
+    public async Task StartAsync(User unauthorizedUser)
     {
       _listener.Start();
       try
@@ -49,7 +49,7 @@ namespace operation_vote.Server.Network
 
           if (context.Request.IsWebSocketRequest)
           {
-            _ = Task.Run(() => ProcessWebSocketHandshakeAsync(context), _cts.Token);
+            _ = Task.Run(() => ProcessWebSocketHandshakeAsync(context, unauthorizedUser), _cts.Token);
           }
           else
           {
@@ -70,17 +70,18 @@ namespace operation_vote.Server.Network
       context.Response.Headers.Add("Access-Control-Max-Age", "86400"); // Cache preflight response for 24 hours
     }
 
-    private async Task ProcessWebSocketHandshakeAsync(HttpListenerContext context)
+    private async Task ProcessWebSocketHandshakeAsync(HttpListenerContext context, User unauthorizedUser)
     {
       try
       {
         HttpListenerWebSocketContext wsContext = await context.AcceptWebSocketAsync(subProtocol: null);
         WebSocket webSocket = wsContext.WebSocket;
         Guid clientId = Guid.NewGuid();
-        _sockets[clientId] = webSocket;
+        ClientInfo client = new(this, clientId, unauthorizedUser);
+        _sockets[client] = webSocket;
 
-        OnChannelClientConnected?.Invoke(this, clientId);
-        await HandleWebSocketLoopAsync(clientId, webSocket);
+        OnChannelClientConnected?.Invoke(this, client);
+        await HandleWebSocketLoopAsync(client, webSocket);
       }
       catch
       {
@@ -89,7 +90,7 @@ namespace operation_vote.Server.Network
       }
     }
 
-    private async Task HandleWebSocketLoopAsync(Guid clientId, WebSocket webSocket)
+    private async Task HandleWebSocketLoopAsync(ClientInfo client, WebSocket webSocket)
     {
       byte[] buffer = new byte[4096];
       string reason = "WebSocket closed normally.";
@@ -113,22 +114,22 @@ namespace operation_vote.Server.Network
 
           if (webSocket.State != WebSocketState.Open || result.MessageType == WebSocketMessageType.Close) break;
 
-          OnChannelDataReceived?.Invoke(this, (clientId, ms.ToArray()));
+          OnChannelDataReceived?.Invoke(this, (client, ms.ToArray()));
         }
       }
       catch (Exception ex) { reason = ex.Message; }
       finally
       {
-        _sockets.TryRemove(clientId, out _);
+        _sockets.TryRemove(client, out _);
         try { await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None); } catch { }
         webSocket.Dispose();
-        OnChannelClientDisconnected?.Invoke(this, (clientId, reason));
+        OnChannelClientDisconnected?.Invoke(this, (client, reason));
       }
     }
 
-    public async Task SendToClientAsync(Guid clientId, byte[] data)
+    public async Task SendToClientAsync(ClientInfo clientInfo, byte[] data)
     {
-      if (_sockets.TryGetValue(clientId, out var socket) && socket.State == WebSocketState.Open)
+      if (_sockets.TryGetValue(clientInfo, out var socket) && socket.State == WebSocketState.Open)
       {
         await socket.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, _cts.Token);
       }

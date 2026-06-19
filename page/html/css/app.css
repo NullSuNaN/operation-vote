@@ -173,4 +173,36 @@ html, body {
 .form-group {
     display: flex;
     flex-direction: column;
+    gap: 5px;
+    align-items: start;
+}
+:not(.form-group)>.form-group {
+    margin-left: 5px;
+}
+.form-item {
+    display: flex;
+    gap: 2px;
+    align-items: start;
+}
+
+.input-field {
+    width: fit-content;
+}
+
+.hidden-field {
+    position: absolute;
+    left: -999999px;
+    width: 1px;
+    height: 1px;
+    min-width: 0;
+    min-height: 0;
+    border: none;
+    margin: 0;
+    padding: 0;
+    background-color: inherit;
+    color: transparent;
+    opacity: 0.1;
+    overflow: hidden;
+    pointer-events: none;
+    user-select: none;
 }

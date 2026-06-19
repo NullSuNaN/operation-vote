@@ -14,6 +14,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\core\core.csproj" SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\shared\shared.csproj" SkipGetTargetFrameworkProperties="true" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.0" PrivateAssets="all" />
   </ItemGroup>

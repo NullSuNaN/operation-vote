@@ -8,9 +8,22 @@
       "preLaunchTask": "dotnet: build client-window.csproj",
       "program": "${workspaceFolder}/client-window/bin/Debug/net10.0/client-window.dll",
       "args": [
-        "172.17.80.1:9055",
-        "false"
+        "localhost:9055",
+        "tcp",
+        "test",
+        "pass"
       ],
+      "cwd": "${workspaceFolder}",
+      "stopAtEntry": false,
+      "console": "internalConsole"
+    },
+    {
+      "name": ".NET server Launch (console)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "dotnet: build server.csproj",
+      "program": "${workspaceFolder}/server/bin/Debug/net10.0/server.dll",
+      "args": [],
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "console": "internalConsole"

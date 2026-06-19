@@ -99,14 +99,11 @@ namespace operation_vote.Client.Request
 
           OnDataReceived?.Invoke(this, new ReadOnlyMemory<byte>(payloadBuffer));
         }
-      }
-      catch (Exception ex) when (ex is IOException || ex is ObjectDisposedException || ex is OperationCanceledException)
-      {
-        // Expected cleanup triggers
-      }
-      finally
-      {
         HandleDisconnect("Connection closed or lost.");
+      }
+      catch (Exception ex)
+      {
+        HandleDisconnect($"Connection closed or lost: {ex.Message}\n{ex.StackTrace}\n");
       }
     }
 
@@ -144,6 +141,9 @@ namespace operation_vote.Client.Request
 
       _stream = null;
       _tcpClient = null;
+
+      Console.WriteLine($"Client Disconnected: {reason}");
+      // Console.WriteLine(Environment.StackTrace);
 
       OnDisconnected?.Invoke(this, reason);
     }

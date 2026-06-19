@@ -2,12 +2,20 @@
   "cSpell.words": [
     "Avalonia",
     "Blazor",
+    "Demi",
+    "hmac",
+    "HMACSHA",
     "lifecycles",
+    "loglvl",
     "mkfifo",
+    "onchange",
     "onclick",
     "oncontextmenu",
+    "onfocus",
+    "oninput",
     "onmousedown",
     "onmouseup",
+    "onsubmit",
     "ontouchend",
     "ontouchstart",
     "RESULTPROCESSOR",
@@ -15,6 +23,7 @@
     "Spacebar",
     "tabindex",
     "Tmds",
+    "WLAN",
     "wwwroot"
   ]
 }

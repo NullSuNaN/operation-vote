@@ -3,95 +3,119 @@
 @using System.Net
 @using System.Text
 @using System.Threading
-@using System.Diagnostics
 @using Microsoft.AspNetCore.Components.Web
+@using Microsoft.JSInterop
 @using operation_vote.Client
-@using operation_vote.Client.Request
 @using operation_vote.Shared
+@using SocketRequestHandler = Client.Request.SocketRequestHandlerWS
 
 @implements IDisposable
 @inject NavigationManager navigationManager
+@inject IJSRuntime JsRuntime
 
 @if (!_isOperational)
 {
   <div class="connection-overlay">
-    <div class="connection-card">
-      <h2>Connect to Vote Node</h2>
+    <form class="connection-card" id="login-form">
+      <h2>Connect to Voting Server</h2>
       <p>Specify the target infrastructure address below:</p>
 
       <div class="form-group">
         <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/"
-               @onkeypress="HandleConnectKeyPairSubmit" disabled="@_isConnecting" />
-        @if(navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase)){
-          <small>Connecting to ws://(instead of wss://) servers in this https:// page may fail and silently crash the app.</small>
+               @onkeypress="HandleConnectKeyPairSubmit" @oninput="UpdateInputField" disabled="@_isConnecting" />
+        @if (navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+          <small>Connecting to ws://(instead of wss://) servers in this https:// page may fail and silently crash the
+            app.</small>
+          }
+          <div class="form-group" style="display: @(UseAnonymous ? "none" : "flex");" @ref="LoginFields">
+            <div>
+              <input type="text" @ref="UsernameField" @oninput="e => {Username = (string?)e.Value ?? string.Empty;UpdateInputField();}" value="@Username" class="input-field"
+                    placeholder="Username" disabled="@_isConnecting" />
+              <input type="text" class="hidden-field" autocomplete="username" @ref="BrowserStorageField"
+                      @oninput="e => BrowserStorageUsername = (string?)e.Value ?? string.Empty" tabindex="-1" />
+            </div>
+            <div class="form-item">
+              <input type="@(HidePassword ? "password" : "text")" @ref="PasswordField" @bind="Password" class="input-field"
+                     placeholder="Password" disabled="@_isConnecting" autocomplete="new-password"
+                     @onfocus='()=>JsRuntime.InvokeVoidAsync("window.helpers.updateInputField", BrowserStorageField, string.Empty)' />
+              <input type="checkbox" @bind="@HidePassword" class="checkbox-field" id="hide-password"
+                     disabled="@_isConnecting" />
+              <label for="hide-password">Hide</label>
+            </div>
+          </div>
+          <div class="form-item">
+            <input type="checkbox" @bind="@UseAnonymous" class="checkbox-field" id="use-anonymous"
+                   disabled="@_isConnecting" />
+            <label for="use-anonymous">Anonymous</label>
+          </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(_errorMessage))
+        {
+          <div class="error-banner">
+            @_errorMessage
+          </div>
         }
-      </div>
 
-      @if (!string.IsNullOrEmpty(_errorMessage))
-      {
-        <div class="error-banner">
-          @_errorMessage
-        </div>
-      }
+        @if (_isConnecting)
+        {
+          <div class="loading-steps-box">
+            <div class="step-row">
+              <span class="step-dot @(CurrentStep >= 1 ? "done" : "active")"></span>
+              <span class="step-text">Allocating network handle tasks...</span>
+            </div>
+            <div class="step-row">
+              <span class="step-dot @(CurrentStep >= 2 ? "done" : CurrentStep == 1 ? "active" : "")"></span>
+              <span class="step-text">Executing remote WebSocket handshake...</span>
+            </div>
+            <div class="step-row">
+              <span class="step-dot @(CurrentStep >= 3 ? "done" : CurrentStep == 2 ? "active" : "")"></span>
+              <span class="step-text">Parsing structural operation metrics...</span>
+            </div>
+            <div class="step-row">
+              <span class="step-dot @(CurrentStep == 4 ? "active" : "")"></span>
+              <span class="step-text">Handing off viewport keyboard traps...</span>
+            </div>
 
-      @if (_isConnecting)
-      {
-        <div class="loading-steps-box">
-          <div class="step-row">
-            <span class="step-dot @(CurrentStep >= 1 ? "done" : "active")"></span>
-            <span class="step-text">Allocating network handle tasks...</span>
+            <div class="mini-progress-track">
+              <div class="mini-progress-bar" style="width: @(CurrentStep * 25)%"></div>
+            </div>
           </div>
-          <div class="step-row">
-            <span class="step-dot @(CurrentStep >= 2 ? "done" : CurrentStep == 1 ? "active" : "")"></span>
-            <span class="step-text">Executing remote WebSocket handshake...</span>
-          </div>
-          <div class="step-row">
-            <span class="step-dot @(CurrentStep >= 3 ? "done" : CurrentStep == 2 ? "active" : "")"></span>
-            <span class="step-text">Parsing structural operation metrics...</span>
-          </div>
-          <div class="step-row">
-            <span class="step-dot @(CurrentStep == 4 ? "active" : "")"></span>
-            <span class="step-text">Handing off viewport keyboard traps...</span>
-          </div>
-
-          <div class="mini-progress-track">
-            <div class="mini-progress-bar" style="width: @(CurrentStep * 25)%"></div>
-          </div>
-        </div>
-      }
-      else
-      {
-        <button class="connect-btn" @onclick="ConnectToServerAsync">
-          <span>Establish Link</span>
-        </button>
-      }
+        }
+        else
+        {
+          <button class="connect-btn" type="submit" @onclick="ConnectToServerAsync" @onsubmit:preventDefault="true">
+            <span>Establish Link</span>
+          </button>
+        }
+      </form>
     </div>
-  </div>
-}
+  }
 else
-{
-  <div class="voting-container" @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
-       @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
-       @ontouchstart:preventDefault="true" @ontouchend:preventDefault="true" @oncontextmenu:preventDefault="true"
-       tabindex="0" @ref="containerRef"
-       style="touch-action: none; user-select: none; -webkit-user-select: none; outline: none; width: 100%; height: 100vh;">
+  {
+    <div class="voting-container" @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
+         @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
+         @ontouchstart:preventDefault="true" @ontouchend:preventDefault="true" @oncontextmenu:preventDefault="true"
+         tabindex="0" @ref="containerRef"
+         style="touch-action: none; user-select: none; -webkit-user-select: none; outline: none; width: 100%; height: 100vh;">
 
-    <div class="status-card @StatusClass">
-      <h1>@StatusTitle</h1>
-      <p class="status-subtitle">@StatusMessage</p>
-      <div class="disconnect-action-zone">
-        <button class="disconnect-btn" @onclick="ManualDisconnect">Terminate Session</button>
+      <div class="status-card @StatusClass">
+        <h1>@StatusTitle</h1>
+        <p class="status-subtitle">@StatusMessage</p>
+        <div class="disconnect-action-zone">
+          <button class="disconnect-btn" @onclick="ManualDisconnect">Terminate Session</button>
+        </div>
       </div>
     </div>
-  </div>
-}
+  }
 
 @code {
   private static readonly string InstructionsProtocolVersion = "1.2";
   private ElementReference containerRef;
   private CancellationTokenSource? _cts;
-  private SocketRequestHandlerWS? _wsHandler;
-  private VotingClient<SocketRequestHandlerWS>? _client;
+  private SocketRequestHandler? _wsHandler;
+  private VotingClient<SocketRequestHandler>? _client;
 
   // Upgraded to concurrent structures to support thread-safe background lookup operations
   private readonly ConcurrentDictionary<string, OperationData> _keyOpMapping = new();
@@ -111,9 +135,34 @@ else
   private int CurrentStep { get; set; } = 0;
 
   private string ServerUri { get; set; } = "ws://192.168.1.2:9056/";
+  private string Username { get; set; } = "";
+  private string Password { get; set; } = "";
+  private ElementReference UsernameField;
+  private ElementReference PasswordField;
+  private ElementReference BrowserStorageField;
+  private ElementReference LoginFields;
+  private bool UseAnonymous { get; set; } = true;
+  private bool HidePassword { get; set; } = true;
   private string StatusTitle { get; set; } = "Initializing System";
   private string StatusMessage = "Synchronizing operational maps...";
   private string StatusClass = "ready";
+  private string BrowserStorageUsername
+  {
+    get => $"{Username.Length}:{Username}@{ServerUri}";
+    set
+    {
+      if (string.IsNullOrEmpty(value)) return;
+      int colonIndex = value.IndexOf(':');
+      if (colonIndex <= 0) return;
+      ReadOnlySpan<char> valueSpan = value.AsSpan();
+      if (!int.TryParse(valueSpan.Slice(0, colonIndex), out int usernameLength) || usernameLength < 0) return;
+      int expectedAtMarkerIndex = colonIndex + 1 + usernameLength;
+      if (value.Length <= expectedAtMarkerIndex) return;
+      if (value[expectedAtMarkerIndex] != '@') return;
+      Username = value.Substring(colonIndex + 1, usernameLength);
+      ServerUri = value.Substring(expectedAtMarkerIndex + 1);
+    }
+  }
 
   private async Task ConnectToServerAsync()
   {
@@ -128,18 +177,46 @@ else
     CurrentStep = 1;
     StateHasChanged();
 
+    string? actualFailureDetail = null;
     try
     {
       _cts = new CancellationTokenSource();
-      _wsHandler = new SocketRequestHandlerWS();
-      _client = new VotingClient<SocketRequestHandlerWS>(_wsHandler, ServerUri, _cts.Token);
+      _wsHandler = new SocketRequestHandler();
+      _client = new VotingClient<SocketRequestHandler>(_wsHandler, ServerUri, _cts.Token)
+      {
+        authenticationData = UseAnonymous ? null : new(Username, Password)
+      };
 
       _client.OnDisconnect += HandleClientDisconnect;
+      TaskCompletionSource<string?> authCs = new();
+
+      _client.OnAuthorizationFinished += (object? sender, bool success) =>
+      {
+        if (!success)
+        {
+          var client = (VotingClient<SocketRequestHandler>?)sender;
+          var username = client?.authenticationData?.Username;
+          var message = username == null ? "Failed to authorize to the operation server." : $"Failed to authorize to the operation server as {username}.";
+          authCs.SetResult(message);
+        }
+        else
+        {
+          authCs.SetResult(null);
+        }
+      }; // strict login requirement
 
       CurrentStep = 2;
       StateHasChanged();
 
       await _client.ConnectAsync();
+      authCs.TrySetResult(null);
+      var authRes = await authCs.Task;
+      if (authRes != null)
+      {
+        _client?.Dispose();
+        actualFailureDetail = authRes;
+        throw new Exception();
+      }
 
       CurrentStep = 3;
       StateHasChanged();
@@ -190,7 +267,7 @@ else
     }
     catch (Exception ex)
     {
-      string actualFailureDetail = ex.Message;
+      actualFailureDetail ??= ex.Message;
       if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") ||
 actualFailureDetail.Contains("ObjectDisposed"))
       {
@@ -224,7 +301,7 @@ actualFailureDetail.Contains("ObjectDisposed"))
     }
   }
 
-  private void HandleClientDisconnect(object? sender, (SocketRequestHandlerWS Handler, string Reason) data)
+  private void HandleClientDisconnect(object? sender, (SocketRequestHandler Handler, string Reason) data)
   {
     _afkLock.EnterWriteLock();
     try
@@ -516,28 +593,31 @@ actualFailureDetail.Contains("ObjectDisposed"))
 
     DisconnectAndReset();
   }
-  
-  public async Task EventWrapper(Task result){
+
+  public async Task EventWrapper(Task result)
+  {
     try
     {
       await result;
     }
-    catch(Exception e)
+    catch (Exception e)
     {
       _errorMessage = e.Message;
       try
       {
         _client?.Dispose();
       }
-      finally {};
+      finally { }
+      ;
     }
   }
-  // @onkeydown="OHandleKeyDown" @onkeyup="OHandleKeyUp" @onmousedown="OHandleMouseDown"
-  //     @onmouseup="OHandleMouseUp" @ontouchstart="OHandleTouchStart" @ontouchend="OHandleTouchEnd"
+  public Task OHandleInputPassword(TouchEventArgs e) => EventWrapper(HandleTouchEnd(e));
   public Task OHandleKeyDown(KeyboardEventArgs e) => EventWrapper(HandleKeyDown(e));
   public Task OHandleKeyUp(KeyboardEventArgs e) => EventWrapper(HandleKeyUp(e));
   public Task OHandleMouseDown(MouseEventArgs e) => EventWrapper(HandleMouseDown(e));
   public Task OHandleMouseUp(MouseEventArgs e) => EventWrapper(HandleMouseUp(e));
   public Task OHandleTouchStart(TouchEventArgs e) => EventWrapper(HandleTouchStart(e));
   public Task OHandleTouchEnd(TouchEventArgs e) => EventWrapper(HandleTouchEnd(e));
+  private Task UpdateInputField() =>
+    JsRuntime.InvokeVoidAsync("window.helpers.updateInputField", BrowserStorageField, BrowserStorageUsername).AsTask();
 }

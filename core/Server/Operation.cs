@@ -33,11 +33,8 @@ namespace operation_vote.Server
     /// <summary>
     /// Factory helper to build a Server-Side Operation domain model from client wire payload bytes.
     /// </summary>
-    public static Operation? Deserialize(byte[] bytes, List<OperationType> opList)
+    public static Operation? Deserialize(BinaryReader reader, List<OperationType> opList)
     {
-      using var ms = new MemoryStream(bytes);
-      using var reader = new BinaryReader(ms, Encoding.UTF8);
-
       // 1. Read the inner OperationType structural components
       long typeId = reader.ReadInt64();
       if(typeId <= 0 || typeId > opList.Count)
@@ -53,15 +50,18 @@ namespace operation_vote.Server
 
       return new Operation(type, voteType, stateBytes);
     }
+    public static Operation? Deserialize(byte[] bytes, List<OperationType> opList)
+    {
+      using var ms = new MemoryStream(bytes);
+      using var reader = new BinaryReader(ms, Encoding.UTF8);
+      return Deserialize(reader, opList);
+    }
 
     /// <summary>
-    /// Serializes the server's processed operation back to binary format for client confirmation loops.
+    /// Serializes the server's processed operation back to binary format and write it to a BinaryWriter.
     /// </summary>
-    public byte[] ToByteArray()
+    public void Serialize(BinaryWriter writer)
     {
-      using var ms = new MemoryStream();
-      using var writer = new BinaryWriter(ms, Encoding.UTF8);
-
       // 1. Write the Type parameters
       writer.Write(Type.Id);
 
@@ -71,6 +71,15 @@ namespace operation_vote.Server
       writer.Write(StateBytes);
 
       writer.Flush();
+    }
+    /// <summary>
+    /// Serializes the server's processed operation back to binary format.
+    /// </summary>
+    public byte[] Serialize()
+    {
+      using var ms = new MemoryStream();
+      using var writer = new BinaryWriter(ms, Encoding.UTF8);
+      Serialize(writer);
       return ms.ToArray();
     }
   }

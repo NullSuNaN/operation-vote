@@ -1,9 +1,6 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
@@ -17,12 +14,14 @@ namespace operation_vote.Interface.ClientWindow
 	public class VotingWindow<T> : Window where T : ISocketRequestHandler
 	{
 		private readonly TextBlock _statusLabel;
+		private readonly TextBlock _userLabel;
 		private readonly Dictionary<Key, KeyEventArgs> _pressedKeysState = [];
 		private readonly HashSet<KeyMappingExtensions.MouseButton> _pressedMouseButtonState = [];
 		public readonly VotingClient<T> Client;
 		private readonly CancellationTokenSource DisconnectCts = new();
 		private readonly CancellationTokenSource PressToCloseCts = new();
 		private bool _readyToForceClose = false;
+		private bool isBanned = false;
 
 		public VotingWindow(VotingClient<T> client, ConcurrentDictionary<string, Operation.OperationType> keyOp, Action trackActivity)
 		{
@@ -44,9 +43,51 @@ namespace operation_vote.Interface.ClientWindow
 				FontSize = 16,
 				FontWeight = FontWeight.Bold,
 				Foreground = Brushes.Lime,
+				TextWrapping = TextWrapping.Wrap,
+				Margin = new Thickness(0, 0, 0, 10) // Adds 10px spacing below this row
+			};
+
+			_userLabel = new TextBlock
+			{
+				HorizontalAlignment = HorizontalAlignment.Center,
+				VerticalAlignment = VerticalAlignment.Center,
+				TextAlignment = TextAlignment.Center,
+				FontSize = 12,
+				FontWeight = FontWeight.DemiBold,
+				Foreground = Brushes.Gray,
 				TextWrapping = TextWrapping.Wrap
 			};
-			Content = _statusLabel;
+			(_userLabel.Text, _userLabel.Foreground) = GetUserLabel();
+			var mainContainer = new StackPanel
+			{
+				HorizontalAlignment = HorizontalAlignment.Center,
+				VerticalAlignment = VerticalAlignment.Center
+			};
+
+			client.OnVoteMultiplierChange += (sender, e) =>
+			{
+				bool _isBanned = e.New == 0;
+				Console.WriteLine($"OnVoteMultiplierChange: {e.Original} -> {e.New}");
+				if (Interlocked.Exchange(ref isBanned, _isBanned) != _isBanned || true)
+				{
+					Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+						(_userLabel.Text, _userLabel.Foreground) = GetUserLabel()
+					);
+				}
+			};
+			client.OnUserChanged += (sender, user) =>
+			{
+				Console.WriteLine($"OnUserChanged: {GetUserLabel().Content}");
+				Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+					(_userLabel.Text, _userLabel.Foreground) = GetUserLabel()
+				);
+			};
+			isBanned = client.VoteMultiplier == 0;
+
+			mainContainer.Children.Add(_statusLabel);
+			mainContainer.Children.Add(_userLabel);
+
+			Content = mainContainer;
 
 			client.OnDisconnect += (sender, e) => Avalonia.Threading.Dispatcher.UIThread.Post(HandleDisconnect);
 
@@ -65,21 +106,14 @@ namespace operation_vote.Interface.ClientWindow
 				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
-				if (keyOp.TryGetValue(keyStr, out var targetedOpType) && !_pressedKeysState.ContainsKey(key))
-				{
-					var supportOp = new Operation(targetedOpType, VoteType.Support, []);
-					var sendTask = client.SendOperationAsync(supportOp, default);
-
-					_pressedKeysState.Add(key, e);
-					_statusLabel.Text = GetStatusLabel();
-
-					await sendTask;
-				}
-				else
-				{
-					_pressedKeysState.Remove(key);
-					_statusLabel.Text = GetStatusLabel();
-				}
+				if (keyOp.TryGetValue(keyStr, out var targetedOpType))
+					if (_pressedKeysState.TryAdd(key, e))
+					{
+						var supportOp = new Operation(targetedOpType, VoteType.Support, []);
+						var sendTask = client.SendOperationAsync(supportOp, default);
+						_statusLabel.Text = GetStatusLabel();
+						await sendTask;
+					}
 			};
 
 			// KEY UP
@@ -89,21 +123,14 @@ namespace operation_vote.Interface.ClientWindow
 				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
-				if (keyOp.TryGetValue(keyStr, out var targetedOpType) && _pressedKeysState.ContainsKey(key))
-				{
-					var againstOp = new Operation(targetedOpType, VoteType.Against, []);
-					var sendTask = client.SendOperationAsync(againstOp, default);
-
-					_pressedKeysState.Remove(key);
-					_statusLabel.Text = GetStatusLabel();
-
-					await sendTask;
-				}
-				else
-				{
-					_pressedKeysState.Remove(key);
-					_statusLabel.Text = GetStatusLabel();
-				}
+				if (keyOp.TryGetValue(keyStr, out var targetedOpType))
+					if (_pressedKeysState.Remove(key))
+					{
+						var againstOp = new Operation(targetedOpType, VoteType.Against, []);
+						var sendTask = client.SendOperationAsync(againstOp, default);
+						_statusLabel.Text = GetStatusLabel();
+						await sendTask;
+					}
 			};
 
 			PointerPressed += async (sender, e) =>
@@ -111,21 +138,14 @@ namespace operation_vote.Interface.ClientWindow
 				if (DisconnectCts.IsCancellationRequested) return;
 				trackActivity();
 				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
-				if (keyOp.TryGetValue(button.ToString(), out var targetedOpType) && !_pressedMouseButtonState.Contains(button))
-				{
-					var supportOp = new Operation(targetedOpType, VoteType.Support, []);
-					var sendTask = client.SendOperationAsync(supportOp, default);
-
-					_pressedMouseButtonState.Add(button);
-					_statusLabel.Text = GetStatusLabel();
-
-					await sendTask;
-				}
-				else
-				{
-					_pressedMouseButtonState.Remove(button);
-					_statusLabel.Text = GetStatusLabel();
-				}
+				if (keyOp.TryGetValue(button.ToString(), out var targetedOpType))
+					if (_pressedMouseButtonState.Add(button))
+					{
+						var supportOp = new Operation(targetedOpType, VoteType.Support, []);
+						var sendTask = client.SendOperationAsync(supportOp, default);
+						_statusLabel.Text = GetStatusLabel();
+						await sendTask;
+					}
 			};
 
 			PointerReleased += async (sender, e) =>
@@ -133,21 +153,14 @@ namespace operation_vote.Interface.ClientWindow
 				if (DisconnectCts.IsCancellationRequested) return;
 				trackActivity();
 				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
-				if (keyOp.TryGetValue(button.ToString(), out var targetedOpType) && !_pressedMouseButtonState.Contains(button))
-				{
-					var against = new Operation(targetedOpType, VoteType.Against, []);
-					var sendTask = client.SendOperationAsync(against, default);
-
-					_pressedMouseButtonState.Add(button);
-					_statusLabel.Text = GetStatusLabel();
-
-					await sendTask;
-				}
-				else
-				{
-					_pressedMouseButtonState.Remove(button);
-					_statusLabel.Text = GetStatusLabel();
-				}
+				if (keyOp.TryGetValue(button.ToString(), out var targetedOpType))
+					if (_pressedMouseButtonState.Remove(button))
+					{
+						var against = new Operation(targetedOpType, VoteType.Against, []);
+						var sendTask = client.SendOperationAsync(against, default);
+						_statusLabel.Text = GetStatusLabel();
+						await sendTask;
+					}
 			};
 		}
 
@@ -172,12 +185,45 @@ namespace operation_vote.Interface.ClientWindow
 			}
 			return builder.ToString();
 		}
+		public (string Content, IBrush Color) GetUserLabel()
+		{
+			StringBuilder builder = new("");
+			IBrush color;
+
+			string? user = Client.User;
+			if (user != null)
+			{
+				builder.Append($"Logged in as {user}");
+				if (isBanned)
+				{
+					builder.Append($", BANNED!");
+					color = Brushes.Red;
+				}
+				else
+					color = Brushes.Lime;
+			}
+			else
+			{
+				if (isBanned)
+				{
+					builder.Append("Unauthorized!");
+					color = Brushes.Red;
+				}
+				else
+				{
+					builder.Append("Anonymous");
+					color = Brushes.Lime;
+				}
+			}
+
+			return (builder.ToString(), color);
+		}
 
 		private void HandleDisconnect()
 		{
 			if (DisconnectCts.IsCancellationRequested) return;
 			DisconnectCts.Cancel();
-			
+
 			_statusLabel.Text = "Disconnected and failed to reconnect to the server!";
 			_statusLabel.Foreground = Brushes.Olive;
 

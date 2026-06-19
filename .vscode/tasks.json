@@ -7,6 +7,13 @@
       "file": "${cwd}/client-window/client-window.csproj",
       "group": "build",
       "label": "dotnet: build client-window.csproj",
+    },
+    {
+      "type": "dotnet",
+      "task": "build ${cwd}/server/server.csproj",
+      "file": "${cwd}/server/server.csproj",
+      "group": "build",
+      "label": "dotnet: build server.csproj",
     }
   ]
 }

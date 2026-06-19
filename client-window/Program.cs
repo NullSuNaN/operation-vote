@@ -1,18 +1,11 @@
-﻿using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using System.Collections.Concurrent;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using operation_vote.Client;
 using operation_vote.Client.Request;
 using operation_vote.Shared;
+using operation_vote.Interface.Shared;
 
 namespace operation_vote.Interface.ClientWindow
 {
@@ -23,28 +16,35 @@ namespace operation_vote.Interface.ClientWindow
     {
       if (args.Length < 1)
       {
-        Console.WriteLine("Usage: client-console <uri:(ip[:port])> [<protocol:tcp|ws|wss>(tcp)]");
+        Console.WriteLine("Usage: client-window <uri:(ip[:port])> [<protocol:tcp|ws|wss>(tcp)] [<username:string?>(null:unauthorized)] [<password:string>(42)]");
         return;
       }
       var uri = args[0];
+      AuthenticationClient.AuthenticationData? authenticationData = null;
+      if(args.Length >= 3)
+      {
+        string password = "42";
+        if(args.Length >= 4) password=args[3];
+        authenticationData = new(args[2], password);
+        Console.WriteLine($"Logging in as {authenticationData.Username}");
+      }
       if (args.ElementAtOrDefault(1) == "ws")
       {
-        new WindowClient<SocketRequestHandlerWS>().Main(args, $"ws://{uri}/");
+        new WindowClient<SocketRequestHandlerWS>().Main(args, authenticationData, $"ws://{uri}/");
       }
       else if (args.ElementAtOrDefault(1) == "wss")
       {
-        new WindowClient<SocketRequestHandlerWS>().Main(args, $"wss://{uri}/");
+        new WindowClient<SocketRequestHandlerWS>().Main(args, authenticationData, $"wss://{uri}/");
       }
       else
       {
-        new WindowClient<SocketRequestHandlerTCP>().Main(args, uri);
+        new WindowClient<SocketRequestHandlerTCP>().Main(args, authenticationData, uri);
       }
     }
   }
 
   public class WindowClient<T> where T : ISocketRequestHandler, new()
   {
-    private static readonly string InstructionsProtocolVersion = "1.2";
     private CancellationTokenSource? _cts;
     private ISocketRequestHandler? _tcpHandler;
     private VotingClient<T>? _client;
@@ -59,7 +59,7 @@ namespace operation_vote.Interface.ClientWindow
     private CancellationTokenSource? _afkCts;
 
     [STAThread]
-    public void Main(string[] args, string uri)
+    public void Main(string[] args, AuthenticationClient.AuthenticationData? authenticationData, string uri)
     {
       Console.WriteLine("=== STARTING VOTING CLIENT RUNTIME DOMAIN ===");
 
@@ -82,7 +82,7 @@ namespace operation_vote.Interface.ClientWindow
           // We intercept the framework's native startup to initialize our assets synchronously with it
           desktop.Startup += async (sender, startupArgs) =>
           {
-            await InitializeAndShowUIAsync(uri, desktop);
+            await InitializeAndShowUIAsync(uri, authenticationData, desktop);
           };
 
           // Hard shutdown handle to clean up background tasks instantly on exit
@@ -146,7 +146,7 @@ namespace operation_vote.Interface.ClientWindow
           continue;
         }
 
-        DateTime lastClickTime = new DateTime(Volatile.Read(ref clickTicks), DateTimeKind.Utc);
+        DateTime lastClickTime = new(Volatile.Read(ref clickTicks), DateTimeKind.Utc);
         TimeSpan lowestWait = TimeSpan.MaxValue;
         bool executePulse = false;
         Operation.OperationType? targetedOp = null;
@@ -198,16 +198,31 @@ namespace operation_vote.Interface.ClientWindow
       }
     }
 
-    private async Task InitializeAndShowUIAsync(string uri, IClassicDesktopStyleApplicationLifetime desktop)
+    private async Task InitializeAndShowUIAsync(string uri, AuthenticationClient.AuthenticationData? authenticationData, IClassicDesktopStyleApplicationLifetime desktop)
     {
       try
       {
         _cts ??= new CancellationTokenSource();
         T tcpHandler = new();
         _tcpHandler = tcpHandler;
-        _client = new VotingClient<T>(tcpHandler, uri, _cts.Token);
+        _client = new VotingClient<T>(tcpHandler, uri, _cts.Token)
+        {
+          authenticationData=authenticationData
+        };
 
         Console.WriteLine($"Connecting to network node at {uri}...");
+        _client.OnAuthorizationFinished += (sender, success) =>
+        {
+          if(!success)
+            Console.WriteLine("Failed to login, continuing as Anonymous.");
+        };
+        _client.OnUserChanged += (sender, user) =>
+        {
+          if(user != null)
+            Console.WriteLine($"Logged in as {authenticationData?.Username}");
+          else
+            Console.WriteLine($"Logged out.");
+        };
         await _client.ConnectAsync();
         Console.WriteLine("Handshake completed. Server connection initialized successfully.");
 
@@ -218,40 +233,7 @@ namespace operation_vote.Interface.ClientWindow
         {
           if (opType?.Instructions == null || opType.Instructions.Length == 0) continue;
 
-          var instructionsStrings = new List<string>();
-          using var ms = new MemoryStream(opType.Instructions);
-          using var reader = new BinaryReader(ms, Encoding.UTF8);
-          TimeSpan? afk = null;
-
-          try
-          {
-            var header = reader.ReadString();
-            if (header != $"V{InstructionsProtocolVersion}") throw new ProtocolViolationException("Instructions protocol is mismatched.");
-
-            while (ms.Position < ms.Length)
-            {
-              var instructionType = reader.ReadString();
-              switch (instructionType)
-              {
-                case "keys:":
-                  var keysLength = reader.Read7BitEncodedInt64();
-                  for (int i = 0; i < keysLength; ++i)
-                  {
-                    instructionsStrings.Add(reader.ReadString());
-                  }
-                  break;
-                case "afk:":
-                  afk = TimeSpan.FromMilliseconds(reader.ReadDouble());
-                  Console.WriteLine($"Read AFK time: {afk}");
-                  break;
-              }
-            }
-          }
-          catch (Exception parseEx)
-          {
-            Console.WriteLine($"[Bypass Warning] Operational data profile unit parse error skipped: {parseEx.Message}");
-            continue;
-          }
+          var (instructionsStrings, afk) = InstructionsProtocol.DeserializeInstructions(opType.Instructions);
 
           foreach (string key in instructionsStrings)
           {
@@ -277,7 +259,6 @@ namespace operation_vote.Interface.ClientWindow
         Interlocked.Exchange(ref _lastClickTicks, DateTime.UtcNow.Ticks);
         try { _afkSignal.Release(); } catch { /* no-op */ }
 
-        // --- THE CRITICAL LIFETIME FIX ---
         var window = new VotingWindow<T>(_client, _keyOpMapping, TrackUserActivity);
         desktop.MainWindow = window; 
         
@@ -288,7 +269,7 @@ namespace operation_vote.Interface.ClientWindow
       {
         Console.ForegroundColor = ConsoleColor.Red;
         Console.WriteLine($"[Fatal Error] Network/UI Sync failed: {ex.Message}");
-        Console.WriteLine(ex.StackTrace);
+        // Console.WriteLine(ex.StackTrace);
         Console.ResetColor();
         
         // If the connection drops before initialization finishes, exit the app
