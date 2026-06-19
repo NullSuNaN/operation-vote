@@ -20,6 +20,8 @@ namespace operation_vote.Server.Network
     public event EventHandler<ClientInfo>? OnChannelClientConnected;
     public event EventHandler<(ClientInfo Client, string Reason)>? OnChannelClientDisconnected;
     public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataReceived;
+    public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataSent;
+
 
     public WSServerChannel(string prefixUri)
     {
@@ -127,11 +129,20 @@ namespace operation_vote.Server.Network
       }
     }
 
-    public async Task SendToClientAsync(ClientInfo clientInfo, byte[] data)
+    public async Task SendToClientAsync(ClientInfo client, byte[] data)
     {
-      if (_sockets.TryGetValue(clientInfo, out var socket) && socket.State == WebSocketState.Open)
+      if (_sockets.TryGetValue(client, out var socket) && socket.State == WebSocketState.Open)
       {
         await socket.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, _cts.Token);
+        OnChannelDataSent?.Invoke(this, (client, data));
+      }
+    }
+
+    public async Task ResetAsync(ClientInfo Client)
+    {
+      if (_sockets.TryGetValue(Client, out var socket) && socket.State == WebSocketState.Open)
+      {
+        socket.Abort();
       }
     }
 

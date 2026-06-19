@@ -17,7 +17,7 @@ namespace operation_vote.Client.Request
 
     // Nullable event handlers to align with Nullable context
     public event EventHandler<ReadOnlyMemory<byte>>? OnDataReceived;
-    public event EventHandler<string>? OnDisconnected;
+    public event EventHandler<Func<(string reason, bool isNormal)>>? OnDisconnected;
 
     public async Task ConnectAsync(string uri, CancellationToken cancellationToken = default)
     {
@@ -33,8 +33,10 @@ namespace operation_vote.Client.Request
 
       string host = parts[0];
 
-      _tcpClient = new();
-      _tcpClient.NoDelay = true;
+      _tcpClient = new()
+      {
+        NoDelay = true
+      };
       await _tcpClient.ConnectAsync(host, port, cancellationToken);
       _stream = _tcpClient.GetStream();
       _cts = new CancellationTokenSource();
@@ -99,11 +101,16 @@ namespace operation_vote.Client.Request
 
           OnDataReceived?.Invoke(this, new ReadOnlyMemory<byte>(payloadBuffer));
         }
-        HandleDisconnect("Connection closed or lost.");
+        HandleDisconnect(()=>("Connection closed.", true));
+      }
+      catch (OperationCanceledException)
+      {
+        // Treat cancellation as a normal disconnection
+        HandleDisconnect(()=>("Connection closed.", true));
       }
       catch (Exception ex)
       {
-        HandleDisconnect($"Connection closed or lost: {ex.Message}\n{ex.StackTrace}\n");
+        HandleDisconnect(()=>($"Connection lost: {ex.Message}", false));
       }
     }
 
@@ -127,11 +134,11 @@ namespace operation_vote.Client.Request
       if (!IsConnected) return;
 
       _cts?.Cancel();
-      HandleDisconnect("Client requested explicit disconnect.");
+      HandleDisconnect(()=>("Client aborted the connection.", true));
       await Task.CompletedTask;
     }
 
-    private void HandleDisconnect(string reason)
+    private void HandleDisconnect(Func<(string reason, bool isNormal)> reason)
     {
       if (_tcpClient == null) return;
 
@@ -142,16 +149,13 @@ namespace operation_vote.Client.Request
       _stream = null;
       _tcpClient = null;
 
-      Console.WriteLine($"Client Disconnected: {reason}");
-      // Console.WriteLine(Environment.StackTrace);
-
       OnDisconnected?.Invoke(this, reason);
     }
 
     public void Dispose()
     {
       if (_isDisposed) return;
-      HandleDisconnect("Client is closed.");
+      HandleDisconnect(()=>("Connection closed.", true));
 
       _cts?.Cancel();
       _cts?.Dispose();

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace operation_vote.Shared
 {
   public static class ReaderWriterLockSlimExtensions
@@ -54,6 +56,14 @@ namespace operation_vote.Shared
     {
       this.targetLock=targetLock;
       this.lockType=lockType;
+    }
+
+    ~ReaderWriterLockSlimToken()
+    {
+      Console.ForegroundColor = ConsoleColor.Red;
+      Console.Error.WriteLine($"A {typeof(ReaderWriterLockSlimToken)} is not disposed!\a");
+      Console.ForegroundColor = ConsoleColor.White;
+      Debugger.Break();
     }
   }
 }

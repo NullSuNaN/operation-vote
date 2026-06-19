@@ -161,7 +161,17 @@ namespace operation_vote.Server
             if (user != null)
             {
               clientInfo.User = user;
-              await SendMultiplierUpdateAsync(user);
+              int userMultiplier = user.VoteMultiplier;
+              if (userMultiplier != ProtocolInfo.ClientDefaultVoteMultiplier)
+                using (var ms = new MemoryStream())
+                using (var writer = new BinaryWriter(ms, Encoding.UTF8))
+                {
+                  writer.Write(ProtocolInfo.ServerCommands.UpdateStatusCommand);
+                  writer.Write("MUL");
+                  writer.Write7BitEncodedInt(userMultiplier);
+                  writer.Flush();
+                  await SendDirectAsync(clientInfo, ms.ToArray());
+                }
               OnClientAuthorized?.Invoke(this, (clientInfo, user));
             }
             else

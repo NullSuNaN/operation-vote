@@ -7,7 +7,7 @@ namespace operation_vote.Client.Request
     public bool IsConnected { get; private set; }
 
     public event EventHandler<ReadOnlyMemory<byte>>? OnDataReceived;
-    public event EventHandler<string>? OnDisconnected;
+    public event EventHandler<Func<(string reason, bool isNormal)>>? OnDisconnected;
 
     public Task ConnectAsync(string uri, CancellationToken cancellationToken = default)
     {
@@ -77,12 +77,14 @@ namespace operation_vote.Client.Request
     {
       IsConnected = false;
       Console.WriteLine("   -> [Mock Socket] ALERT: Connection lost violently!");
-      OnDisconnected?.Invoke(this, "Connection reset by remote peer");
+      OnDisconnected?.Invoke(this, ()=>("Connection reset by remote peer.", false));
     }
 
     public void Dispose()
     {
       IsConnected = false;
+      GC.SuppressFinalize(this);
+      OnDisconnected?.Invoke(this, ()=>("Connection closed.", true));
     }
   }
 }

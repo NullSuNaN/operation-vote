@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using operation_vote.Interface.Shared;
@@ -21,9 +22,16 @@ namespace operation_vote.Interface.Server
     [property: JsonPropertyName("AfkLimit")] string? AfkLimit
   );
 
+  public record LoggingConfig(
+    [property: JsonPropertyName("LogLevel")] string LogLevel,
+    [property: JsonPropertyName("LogNetworkTrace")] bool? LogNetworkTrace
+  );
+
   public record ServerAppConfig(
     [property: JsonPropertyName("Network")] NetworkConfig Network,
-    [property: JsonPropertyName("Profiles")] List<ProfileConfig> Profiles
+    [property: JsonPropertyName("Alert")] bool? Alert,
+    [property: JsonPropertyName("Profiles")] List<ProfileConfig> Profiles,
+    [property: JsonPropertyName("Logging")] LoggingConfig? Logging
   );
 
   internal class Program
@@ -31,58 +39,73 @@ namespace operation_vote.Interface.Server
     private static long _idCounter = 0;
     public static long NewId => Interlocked.Increment(ref _idCounter);
     public static UserDatabase userDB = null!;
+    public static string programName = Environment.GetCommandLineArgs().FirstOrDefault("server");
     public static async Task<int> Main(string[] args)
     {
-      userDB=[];
+      userDB = [];
       string? first = args.FirstOrDefault((string?)null);
-      string configFile = first ?? "config.json";
-      if(first?.StartsWith("--") ?? false)
+      string configFile = "config.json";
+      bool runManager = false;
+      if (first?.StartsWith("--") ?? false)
       {
-        if(first.Length == 2)
+        if (first.Length == 2)
           configFile = args.ElementAtOrDefault(1) ?? "config.json";
         else if (first == "--manager")
         {
-          UserDatabase.RunConsoleManager();
+          runManager = true;
+        }
+        else if (first == "--help")
+        {
+          ShowHelp();
           return 0;
         }
         else
         {
+          Console.WriteLine($"Invalid option: {first}");
+          Console.WriteLine($"Use {programName} --help to get help");
           return 1;
         }
       }
-      string configPath = Path.Combine(AppContext.BaseDirectory, first ?? "config.json");
+      else configFile = first ?? configFile;
+      string configPath = Path.Combine(AppContext.BaseDirectory, configFile);
 
       if (!File.Exists(configPath))
       {
         Console.ForegroundColor = ConsoleColor.Red;
-        ServerLogger.logger.LogInformation(()=>$"[Fatal Error] Configuration layout target missing at: {configPath}");
+        ServerLogger.logger.LogInformation(() => $"[Fatal Error] Configuration layout target missing at: {configPath}");
         Console.ResetColor();
         return 0;
       }
 
       try
       {
-        ServerLogger.logger.LogInformation(()=>"=== INITIALIZING ===");
-        ServerLogger.logger.LogInformation(()=>$"Loading configuration rules from: {configPath}");
+        ServerLogger.logger.LogInformation(() => "=== INITIALIZING ===");
+        ServerLogger.logger.LogInformation(() => $"Loading configuration rules from: {configPath}");
 
         string jsonText = await File.ReadAllTextAsync(configPath);
         var config = JsonSerializer.Deserialize<ServerAppConfig>(jsonText);
 
         if (config == null || config.Network == null || config.Profiles == null)
         {
-          ServerLogger.logger.LogInformation(()=>"[Error] Serialization failed: Root metadata target fields are null.");
-          return 0;
+          ServerLogger.logger.LogInformation(() => "[Error] Serialization failed: Root metadata target fields are null.");
+          return 1;
         }
 
-        await RunServerWithConfigAsync(config);
+        if (config.Alert ?? false)
+          Console.Write('\a');
+
+        if (runManager)
+          UserDatabase.RunConsoleManager();
+        else
+          await RunServerWithConfigAsync(config);
       }
       catch (Exception ex)
       {
         Console.ForegroundColor = ConsoleColor.Red;
-        ServerLogger.logger.LogInformation(()=>$"[Fatal System Crash] Runtime config parse failure: {ex.Message}");
+        ServerLogger.logger.LogInformation(() => $"[Fatal System Crash] Runtime config parse failure: {ex.Message}");
         if (ex.InnerException != null)
         {
-          ServerLogger.logger.LogInformation(()=>$"Details: {ex.InnerException.Message}");
+          ServerLogger.logger.LogInformation(() => $"Details: {ex.InnerException.Message}");
         }
         Console.ResetColor();
       }
@@ -91,6 +114,14 @@ namespace operation_vote.Interface.Server
 
     private static async Task RunServerWithConfigAsync(ServerAppConfig config)
     {
+      var loggingConfig = config.Logging;
+      bool LogNetworkTrace = loggingConfig?.LogNetworkTrace ?? false;
+      if (loggingConfig != null)
+      {
+        if(GetLogLevel(loggingConfig.LogLevel) is LogLevel level)
+          ServerLogger.CurrentLogLevel = level;
+      }
+
       // 1. TCP Driver Binds Directly
       var tcpDriver = string.IsNullOrEmpty(config.Network.TcpHost)
           ? null
@@ -128,6 +159,18 @@ namespace operation_vote.Interface.Server
       var transportCluster = new List<IConcurrentServerChannel>();
       if (tcpDriver != null) transportCluster.Add(new ConcurrentChannelWrapper<TcpServerChannel>(tcpDriver));
       if (wsDriver != null) transportCluster.Add(new ConcurrentChannelWrapper<WSServerChannel>(wsDriver));
+      if(LogNetworkTrace)
+        foreach (var cluster in transportCluster)
+        {
+          cluster.OnChannelDataReceived += (sender, e) =>
+          {
+            ServerLogger.logger.LogTrace(() => $"[Network] {e.Client.ClientId} -> server: {Encoding.UTF8.GetString(e.Payload)} |{string.Concat(e.Payload.Select(b => ' '+b.ToString()))}");
+          };
+          cluster.OnChannelDataSent += (sender, e) =>
+          {
+            ServerLogger.logger.LogTrace(() => $"[Network] server -> {e.Client.ClientId}: {Encoding.UTF8.GetString(e.Payload)} |{string.Concat(e.Payload.Select(b => ' '+b.ToString()))}");
+          };
+        }
 
       var operationalSuite = new List<Operation.OperationType>();
 
@@ -138,15 +181,16 @@ namespace operation_vote.Interface.Server
       {
         long targetId = NewId;
         TimeSpan? afkSpan = null;
-        if(profile.AfkLimit != null)
+        if (profile.AfkLimit != null)
         {
-          if(TimeSpan.TryParse(profile.AfkLimit.AsSpan(), out var _afkSpan)){
-            afkSpan=_afkSpan;
-            ServerLogger.logger.LogInformation(()=>$"Parsed AFK time limit for {profile.Name}: {profile.AfkLimit} as {_afkSpan}");
+          if (TimeSpan.TryParse(profile.AfkLimit.AsSpan(), out var _afkSpan))
+          {
+            afkSpan = _afkSpan;
+            ServerLogger.logger.LogInformation(() => $"Parsed AFK time limit for {profile.Name}: {profile.AfkLimit} as {_afkSpan}");
           }
           else
           {
-            ServerLogger.logger.LogError(()=>$"Failed to parse AFK time limit for {profile.Name}: {profile.AfkLimit}");
+            ServerLogger.logger.LogError(() => $"Failed to parse AFK time limit for {profile.Name}: {profile.AfkLimit}");
           }
         }
         byte[] packedBytes = InstructionsProtocol.SerializeInstructions(profile.Keys, afkSpan);
@@ -155,15 +199,15 @@ namespace operation_vote.Interface.Server
         operationalSuite.Add(newType);
         profileMapping[targetId] = profile;
 
-        ServerLogger.logger.LogInformation(()=>$"[Configured Profile] {profile.Name} bound to key hooks: [{string.Join(", ", profile.Keys)}]");
+        ServerLogger.logger.LogInformation(() => $"[Configured Profile] {profile.Name} bound to key hooks: [{string.Join(", ", profile.Keys)}]");
       }
 
       var server = new VotingServer(transportCluster, operationalSuite, userDB);
 
-      server.OnClientConnected += (sender, clientId) => ServerLogger.logger.LogDebug(()=>$"[Cluster Joined] Client ID: {clientId}");
-      server.OnClientHandshakeCompleted += (sender, clientId) => ServerLogger.logger.LogDebug(()=>$"[Handshake Verified] Client {clientId} initialized successfully.");
-      server.OnClientDisconnected += (sender, e) => ServerLogger.logger.LogDebug(()=>$"[Cluster Left] Client ID: {e.ClientId}. Reason: {e.Reason}");
-      server.OnClientAuthorized += (sender, e) => ServerLogger.logger.LogDebug(()=>$"[Authorizing] Client ID: {e.Client}. User: {e.User.Name}");
+      server.OnClientConnected += (sender, clientId) => ServerLogger.logger.LogDebug(() => $"[Cluster Joined] Client ID: {clientId}");
+      server.OnClientHandshakeCompleted += (sender, clientId) => ServerLogger.logger.LogDebug(() => $"[Handshake Verified] Client {clientId} initialized successfully.");
+      server.OnClientDisconnected += (sender, e) => ServerLogger.logger.LogDebug(() => $"[Cluster Left] Client ID: {e.ClientId}. Reason: {e.Reason}");
+      server.OnClientAuthorized += (sender, e) => ServerLogger.logger.LogDebug(() => $"[Authorizing] Client ID: {e.Client}. User: {e.User.Name}");
 
       var voteManager = new VotingManager(server);
       voteManager.OnOperationCountChanged += (sender, data) =>
@@ -185,7 +229,8 @@ namespace operation_vote.Interface.Server
       Console.ResetColor();
 
       bool readContinue = true;
-      while(readContinue){
+      while (readContinue)
+      {
         string line = Console.ReadLine() ?? "";
         string[] command = line.Split(' ', StringSplitOptions.None);
         switch (command.FirstOrDefault(""))
@@ -200,27 +245,16 @@ namespace operation_vote.Interface.Server
             readContinue = false;
             break;
           case "loglvl":
-            switch (command.ElementAtOrDefault(1))
-            {
-              case "debug":
-                ServerLogger.CurrentLogLevel = LogLevel.Debug;
-                break;
-              case "information":
-                ServerLogger.CurrentLogLevel = LogLevel.Information;
-                break;
-              case "warning":
-                ServerLogger.CurrentLogLevel = LogLevel.Warning;
-                break;
-              case "error":
-                ServerLogger.CurrentLogLevel = LogLevel.Error;
-                break;
-            }
+            if(GetLogLevel(command.ElementAtOrDefault(1)) is LogLevel level)
+              ServerLogger.CurrentLogLevel = level;
+            else
+              Console.WriteLine($"Current Level: {ServerLogger.CurrentLogLevel}");
             break;
           case "help":
             Console.WriteLine("exit           - shut down the server");
             Console.WriteLine("help           - get help");
             Console.WriteLine("loglvl <level> - set log level to:");
-            Console.WriteLine("  debug/information/warning/error");
+            Console.WriteLine("  trace/debug/information/warning/error");
             Console.WriteLine("manager        - open user manager");
             break;
           default:
@@ -234,6 +268,24 @@ namespace operation_vote.Interface.Server
       server.Stop();
       await serverTask;
       Console.WriteLine("Server is closed.");
+    }
+    static void ShowHelp()
+    {
+      Console.WriteLine($"{programName} [<config-file>:config.json]");
+      Console.WriteLine($"{programName} -- <config-file>");
+      Console.WriteLine($"{programName} --manager");
+    }
+    static LogLevel? GetLogLevel(string? str)
+    {
+      return str?.Trim()?.ToLower() switch
+      {
+        "trace" => LogLevel.Trace,
+        "debug" => LogLevel.Debug,
+        "information" => LogLevel.Information,
+        "warning" => LogLevel.Warning,
+        "error" => LogLevel.Error,
+        _ => null,
+      };
     }
   }
 }

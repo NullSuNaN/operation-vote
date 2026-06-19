@@ -1,0 +1,70 @@
+using operation_vote.Client;
+
+namespace operation_vote.Interface.Shared
+{
+  public static class ClientHelper
+  {
+    public class AfkProcessor
+    {
+      private async Task AFKProcessingThreadAsync(CancellationToken token)
+      {
+        while (!token.IsCancellationRequested)
+        {
+          SortedList<TimeSpan, Operation.OperationType>? localTimeouts;
+          long clickTicks;
+
+          _afkLock.EnterReadLock();
+          try
+          {
+            localTimeouts = _timeouts;
+            clickTicks = Volatile.Read(ref _lastClickTicks);
+          }
+          finally
+          {
+            _afkLock.ExitReadLock();
+          }
+
+          if (localTimeouts == null)
+          {
+            try { await _afkSignal.WaitAsync(token); } catch (OperationCanceledException) { break; }
+            continue;
+          }
+
+          DateTime lastClickTime = new(Volatile.Read(ref clickTicks), DateTimeKind.Utc);
+          TimeSpan lowestWait = TimeSpan.MaxValue;
+          Operation.OperationType operationType;
+
+          foreach (var item in localTimeouts)
+          {
+            TimeSpan calculatedDeadline = item.Key;
+            TimeSpan elapsed = DateTime.UtcNow - lastClickTime;
+            TimeSpan remainingWait = calculatedDeadline - elapsed;
+
+            if (remainingWait <= TimeSpan.Zero)
+            {
+              operationType = item.Value;
+              break;
+            }
+            else if (remainingWait < lowestWait)
+            {
+              operationType = item.Value;
+              lowestWait = remainingWait;
+            }
+          }
+          {
+            int waitMilliseconds = lowestWait == TimeSpan.MaxValue ? -1 : (int)lowestWait.TotalMilliseconds;
+            try
+            {
+              await _afkSignal.WaitAsync(waitMilliseconds, token);
+
+            }
+            catch (OperationCanceledException)
+            {
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -4,7 +4,6 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using operation_vote.Client;
 using operation_vote.Client.Request;
-using operation_vote.Shared;
 using operation_vote.Interface.Shared;
 
 namespace operation_vote.Interface.ClientWindow
@@ -46,7 +45,7 @@ namespace operation_vote.Interface.ClientWindow
   public class WindowClient<T> where T : ISocketRequestHandler, new()
   {
     private CancellationTokenSource? _cts;
-    private ISocketRequestHandler? _tcpHandler;
+    private ISocketRequestHandler? _socketHandler;
     private VotingClient<T>? _client;
 
     // Thread-safe state tracking for the modern AFK logic
@@ -92,7 +91,7 @@ namespace operation_vote.Interface.ClientWindow
             CleanupBackgroundTasks();
             _cts?.Cancel();
             _client?.Dispose();
-            _tcpHandler?.Dispose();
+            _socketHandler?.Dispose();
           };
         }
       });
@@ -104,7 +103,7 @@ namespace operation_vote.Interface.ClientWindow
       CleanupBackgroundTasks();
       _cts?.Cancel();
       _client?.Dispose();
-      _tcpHandler?.Dispose();
+      _socketHandler?.Dispose();
       Console.WriteLine("=== RUNTIME DOMAIN EXITED ===");
     }
 
@@ -148,8 +147,7 @@ namespace operation_vote.Interface.ClientWindow
 
         DateTime lastClickTime = new(Volatile.Read(ref clickTicks), DateTimeKind.Utc);
         TimeSpan lowestWait = TimeSpan.MaxValue;
-        bool executePulse = false;
-        Operation.OperationType? targetedOp = null;
+        Operation.OperationType operationType;
 
         foreach (var item in localTimeouts)
         {
@@ -159,36 +157,21 @@ namespace operation_vote.Interface.ClientWindow
 
           if (remainingWait <= TimeSpan.Zero)
           {
-            executePulse = true;
-            targetedOp = item.Value;
+            operationType=item.Value;
             break;
           }
           else if (remainingWait < lowestWait)
           {
+            operationType=item.Value;
             lowestWait = remainingWait;
           }
         }
-
-        if (executePulse && targetedOp != null)
-        {
-          var activeClient = _client;
-          if (activeClient != null)
-          {
-            try
-            {
-              using var afkOp = new Operation(targetedOp, VoteType.Abstain, Array.Empty<byte>());
-              await activeClient.SendOperationAsync(afkOp, token);
-            }
-            catch { /* Handle drop errors contextually */ }
-          }
-          try { await Task.Delay(1000, token); } catch (OperationCanceledException) { break; }
-        }
-        else
         {
           int waitMilliseconds = lowestWait == TimeSpan.MaxValue ? -1 : (int)lowestWait.TotalMilliseconds;
           try
           {
             await _afkSignal.WaitAsync(waitMilliseconds, token);
+            
           }
           catch (OperationCanceledException)
           {
@@ -203,9 +186,9 @@ namespace operation_vote.Interface.ClientWindow
       try
       {
         _cts ??= new CancellationTokenSource();
-        T tcpHandler = new();
-        _tcpHandler = tcpHandler;
-        _client = new VotingClient<T>(tcpHandler, uri, _cts.Token)
+        T socketHandler = new();
+        _socketHandler = socketHandler;
+        _client = new VotingClient<T>(socketHandler, uri, _cts.Token)
         {
           authenticationData=authenticationData
         };
@@ -223,6 +206,13 @@ namespace operation_vote.Interface.ClientWindow
           else
             Console.WriteLine($"Logged out.");
         };
+        socketHandler.OnDisconnected += (sender, reason) =>
+        {
+          var (_reason, isNormal) = reason();
+          if(!isNormal)
+            Console.WriteLine($"Connection is closed: {_reason}");
+        };
+        
         await _client.ConnectAsync();
         Console.WriteLine("Handshake completed. Server connection initialized successfully.");
 

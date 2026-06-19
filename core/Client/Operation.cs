@@ -1,18 +1,21 @@
-using System;
-using System.IO;
+using System.Runtime.CompilerServices;
 using System.Text;
-using System.Threading;
 using operation_vote.Shared;
 
 namespace operation_vote.Client
 {
-  public class Operation : IDisposable
+  public class Operation(Operation.OperationType type, VoteType voteType, byte[] stateBytes) : IDisposable
   {
-    public class OperationType
+    /// <remarks>
+    /// Access within <see cref="OpTypeLock" />
+    /// </remarks>
+    public class OperationType : IDisposable
     {
       public readonly VotingEnv Env;
       public readonly long Id;
       public readonly byte[] Instructions;
+      public bool IsDisposed { get; private set; } = false;
+      public ReaderWriterLockSlim OpTypeLock = new();
 
       internal OperationType(byte[] instructions, long id, VotingEnv env)
       {
@@ -20,13 +23,19 @@ namespace operation_vote.Client
         Id = id;
         Env = env;
       }
+
+      public void Dispose()
+      {
+        GC.SuppressFinalize(this);
+        IsDisposed = true;
+      }
     }
 
-    public readonly OperationType Type;
-    public readonly long Id;
-    public readonly VoteType VoteType;
+    public readonly OperationType Type = type ?? throw new ArgumentNullException(nameof(type));
+    public readonly long Id = type.Env.NewId;
+    public readonly VoteType VoteType = voteType;
 
-    private byte[] _stateBytes;
+    private byte[] _stateBytes = stateBytes ?? throw new ArgumentNullException(nameof(stateBytes));
     private int _isDisposedState; // 0 = false, 1 = true
     private readonly ReaderWriterLockSlim _stateLock = new();
 
@@ -61,35 +70,34 @@ namespace operation_vote.Client
       }
     }
 
-    public Operation(Operation.OperationType type, VoteType voteType, byte[] stateBytes)
-    {
-      Type = type ?? throw new ArgumentNullException(nameof(type));
-      Id = type.Env.NewId;
-      VoteType = voteType;
-      _stateBytes = stateBytes ?? throw new ArgumentNullException(nameof(stateBytes));
-    }
-
     /// <summary>
     /// Factory helper to build a Server-Side Operation domain model from client wire payload bytes.
     /// </summary>
-    public static Operation? Deserialize(BinaryReader reader, List<OperationType> opList)
+    /// <param name="reader">A binary reader where the data is read.</param>
+    /// <param name="opList">A list of operation types.</param>
+    /// <returns>the op is the deserialize operation and the token is a lock token you must dispose later.</returns>
+    public static (Operation? op, ReaderWriterLockSlimToken? token) Deserialize(BinaryReader reader, List<OperationType> opList)
     {
       // 1. Read the inner OperationType structural components
       long typeId = reader.ReadInt64();
-      if(typeId <= 0 || typeId > opList.Count)
+      if (typeId <= 0 || typeId > opList.Count)
       {
-        return null;
+        return (null, null);
       }
-      var type = opList.ElementAt((Index)(int)(typeId-1));
+      var type = opList.ElementAt((Index)(int)(typeId - 1));
+      var opTypeLockToken = type.OpTypeLock.EnterReadLockAsToken();
+      if (type.IsDisposed)
+        return (null, opTypeLockToken);
 
       // 2. Read the state context fields matching client serialization layout
       VoteType voteType = (VoteType)reader.ReadByte();
       int stateLength = reader.ReadInt32();
       byte[] stateBytes = reader.ReadBytes(stateLength);
 
-      return new Operation(type, voteType, stateBytes);
+      return (new(type, voteType, stateBytes), opTypeLockToken);
     }
-    public static Operation? Deserialize(byte[] bytes, List<OperationType> opList)
+    /// <inheritdoc cref="Deserialize(BinaryReader, List{OperationType})"/>
+    public static (Operation? op, ReaderWriterLockSlimToken? token) Deserialize(byte[] bytes, List<OperationType> opList)
     {
       using var ms = new MemoryStream(bytes);
       using var reader = new BinaryReader(ms, Encoding.UTF8);
@@ -99,10 +107,14 @@ namespace operation_vote.Client
     /// <summary>
     /// Serializes the server's processed operation back to binary format and write it to a BinaryWriter.
     /// </summary>
-    public void Serialize(BinaryWriter writer)
+    public bool Serialize(BinaryWriter writer)
     {
       // 1. Write the Type parameters
-      writer.Write(Type.Id);
+      using(type.OpTypeLock.EnterReadLockAsToken())
+      {
+        if(type.IsDisposed) return false;
+        writer.Write(Type.Id);
+      }
 
       // 2. Write the structural instance metadata (Fixing the client alignment mismatch)
       writer.Write((byte)VoteType);
@@ -110,15 +122,16 @@ namespace operation_vote.Client
       writer.Write(StateBytes);
 
       writer.Flush();
+      return true;
     }
     /// <summary>
     /// Serializes the server's processed operation back to binary format.
     /// </summary>
-    public byte[] Serialize()
+    public byte[]? Serialize()
     {
       using var ms = new MemoryStream();
       using var writer = new BinaryWriter(ms, Encoding.UTF8);
-      Serialize(writer);
+      if(!Serialize(writer)) return null;
       return ms.ToArray();
     }
 

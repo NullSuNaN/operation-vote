@@ -11,7 +11,6 @@ namespace operation_vote.Client
 	{
 		public readonly T SocketRequestHandler;
 		private string _targetURI;
-		private readonly ConcurrentDictionary<long, Operation> _pendingOperations = new();
 		private readonly SemaphoreSlim _connectionLock = new(1, 1);
 
 		// Local storage for parsed Operation Types initialized during connection handshake
@@ -58,6 +57,18 @@ namespace operation_vote.Client
 		public string? User => user;
 
 		public event EventHandler<(int Original, int New)>? OnVoteMultiplierChange;
+		/// <summary>
+		/// Triggered before a reconnection happens and the operation types are reloaded.<br/>
+		/// The original operation types would all be disposed and new ones would be added.
+		/// </summary>
+		public event EventHandler? BeforeOperationsReload;
+		/// <summary>
+		/// Triggered after a reconnection happens and the operation types are reloaded.<br/>
+		/// The original operation types would all be disposed and new ones would be added.<br/>
+		/// The parameter indicates if the reload succeed. If not, it will disconnect.<br/>
+		/// You can resend your active operations here.
+		/// </summary>
+		public event EventHandler<bool>? AfterOperationsReload;
 		/// <summary>
 		/// Triggered both when authorization successes(before <see cref="OnAuthorizationFinished"/>) and the server forces to change the user.
 		/// </summary>
@@ -176,16 +187,25 @@ namespace operation_vote.Client
 		{
 			if (Disconnected || operation.IsDisposed) return;
 
-			_pendingOperations[operation.Id] = operation;
-
 			using var ms = new MemoryStream();
 			using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
 			writer.Write(false);
 			operation.Serialize(writer);
 
-			await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);
-			_pendingOperations.TryRemove(operation.Id, out _);
+			while (!Disconnected && !token.IsCancellationRequested)
+			{
+				bool locked = false;
+				try
+				{
+					_connectionLock.Wait(token);
+					locked = true;
+					if (operation.Type.IsDisposed || token.IsCancellationRequested) return;
+					await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);
+					break;
+				}
+				finally { if (locked) _connectionLock.Release(); }
+			}
 		}
 
 		private async Task ReconnectLoopAsync()
@@ -195,6 +215,8 @@ namespace operation_vote.Client
 			// Prevent multiple reconnection loops from running simultaneously
 			if (Interlocked.Exchange(ref _isReconnecting, 1) == 1)
 				return;
+
+			BeforeOperationsReload?.Invoke(this, EventArgs.Empty);
 
 			try
 			{
@@ -221,7 +243,7 @@ namespace operation_vote.Client
 							// Start inbound listener processing pathway
 							_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
 
-							{ // Initialize connection
+							{ // 1. Initialize connection
 								using var ms = new MemoryStream();
 								using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
@@ -234,29 +256,10 @@ namespace operation_vote.Client
 							bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
 							if (!initialized)
 							{
-								throw new InvalidOperationException("Failed to initialize the connection.");
+								_operationTypes.Clear();
+								throw new InvalidOperationException("Failed to reconnect.");
 							}
-
-							// 1. Replay cached non-disposed operations safely across thread modifications
-							foreach (var pair in _pendingOperations)
-							{
-								if (pair.Value.IsDisposed)
-								{
-									_pendingOperations.TryRemove(pair.Key, out _);
-									continue;
-								}
-
-								using var opMs = new MemoryStream();
-								using var opWriter = new BinaryWriter(opMs, Encoding.UTF8);
-
-								opWriter.Write(false);
-								pair.Value.Serialize(opWriter);
-
-								await SocketRequestHandler.SendAsync(opMs.ToArray(), CancellationToken).ConfigureAwait(false);
-								_pendingOperations.TryRemove(pair.Key, out _);
-							}
-
-							//2. Re-authorize
+							// 2. Re-authorize
 							var _authenticationData = Volatile.Read(ref authenticationData);
 							if (_authenticationData != null)
 							{
@@ -300,7 +303,6 @@ namespace operation_vote.Client
 									OnUserChanged?.Invoke(this, _authenticationData.Username);
 								OnAuthorizationFinished?.Invoke(this, authSuccess);
 							}
-							;
 							{ // 3. Re-send Handshake registration
 								using var ms = new MemoryStream();
 								using var writer = new BinaryWriter(ms, Encoding.UTF8);
@@ -311,6 +313,8 @@ namespace operation_vote.Client
 							}
 
 							Interlocked.Exchange(ref _reconnectAttempts, 0);
+
+							try { AfterOperationsReload?.Invoke(this, true); } finally { }
 							break;
 						}
 						catch (Exception ex)
@@ -318,6 +322,7 @@ namespace operation_vote.Client
 							Console.WriteLine($"Reconnection attempt {Volatile.Read(ref _reconnectAttempts) + 1} failed: {ex.Message}");
 							if (Interlocked.Increment(ref _reconnectAttempts) >= RECONNECT_LIMIT)
 							{
+								AfterOperationsReload?.Invoke(this, false);
 								OnDisconnect?.Invoke(this, (SocketRequestHandler, "Connection is interrupted."));
 								Dispose();
 								break;
@@ -357,6 +362,7 @@ namespace operation_vote.Client
 						}
 
 						int arrayLength = reader.ReadInt32();
+						_operationTypes.Clear();
 						for (int i = 0; i < arrayLength; i++)
 						{
 							int instructionsLength = reader.ReadInt32();
@@ -410,7 +416,7 @@ namespace operation_vote.Client
 			}
 		}
 
-		private void HandleSocketDisconnection(object? sender, string reason)
+		private void HandleSocketDisconnection(object? sender, Func<string> reason)
 		{
 			if (!Disconnected && !CancellationToken.IsCancellationRequested)
 			{
@@ -435,11 +441,6 @@ namespace operation_vote.Client
 			}
 			catch { }
 
-			foreach (var op in _pendingOperations.Values)
-			{
-				op.Dispose();
-			}
-			_pendingOperations.Clear();
 			_operationTypes.Clear();
 
 			_connectionLock.Dispose();

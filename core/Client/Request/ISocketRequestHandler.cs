@@ -42,6 +42,6 @@ namespace operation_vote.Client.Request
 		/// <summary>
 		/// Event raised when the socket connection is lost or closed.
 		/// </summary>
-		event EventHandler<string> OnDisconnected;
+		event EventHandler<Func<(string reason, bool isNormal)>> OnDisconnected;
 	}
 }

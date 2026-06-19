@@ -25,12 +25,14 @@ namespace operation_vote.Server.Network
 
       _underlyingChannel.OnChannelClientConnected += HandleClientConnected;
       _underlyingChannel.OnChannelDataReceived += HandleDataReceived;
+      _underlyingChannel.OnChannelDataSent += HandleDataSent;
       _underlyingChannel.OnChannelClientDisconnected += HandleClientDisconnected;
     }
 
     public event EventHandler<ClientInfo>? OnChannelClientConnected;
     public event EventHandler<(ClientInfo Client, string Reason)>? OnChannelClientDisconnected;
     public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataReceived;
+    public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataSent;
 
     public Task StartAsync(User unauthorizedUser) => _underlyingChannel.StartAsync(unauthorizedUser);
 
@@ -131,6 +133,19 @@ namespace operation_vote.Server.Network
       else
       {
         OnChannelDataReceived?.Invoke(this, e);
+      }
+    }
+
+    private void HandleDataSent(object? sender, (ClientInfo Client, byte[] Payload) e)
+    {
+      // Transform from Inner to Outer context so downstream handlers receive the safe instance mapping
+      if (_innerToOuter.TryGetValue(e.Client, out var outerClient))
+      {
+        OnChannelDataSent?.Invoke(this, (outerClient, e.Payload));
+      }
+      else
+      {
+        OnChannelDataSent?.Invoke(this, e);
       }
     }
 

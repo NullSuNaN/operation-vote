@@ -171,6 +171,33 @@
         "additionalProperties": false
       }
     },
+    "Alert": {
+      "type": "boolean",
+      "description": "If the server would ring a bell(\\a) as soon as the server launches.\nCan be used as a compile complete and stop watching youtube alert."
+    },
+    "Logging": {
+      "type": "object",
+      "description": "Configure how does the server log.",
+      "properties": {
+        "LogLevel": {
+          "enum": [
+            "trace",
+            "debug",
+            "information",
+            "warning",
+            "error"
+          ],
+          "description": "The default log level.It can be changed through `loglvl` command later"
+        },
+        "LogNetworkTrace": {
+          "type": "boolean",
+          "description": "Log the network trace with `trace` level"
+        }
+      },
+      "required": [
+        "LogLevel"
+      ]
+    },
     "$schema": {
       "type": "string",
       "examples": [

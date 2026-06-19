@@ -15,6 +15,7 @@ namespace operation_vote.Server.Network
     public event EventHandler<ClientInfo>? OnChannelClientConnected;
     public event EventHandler<(ClientInfo Client, string Reason)>? OnChannelClientDisconnected;
     public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataReceived;
+    public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataSent;
 
     public async Task StartAsync(User unauthorizedUser)
     {
@@ -101,6 +102,14 @@ namespace operation_vote.Server.Network
 
         await stream.WriteAsync(lengthHeader, 0, 4);
         await stream.WriteAsync(data, 0, data.Length);
+        OnChannelDataSent?.Invoke(this, (client, data));
+      }
+    }
+    public async Task ResetAsync(ClientInfo Client)
+    {
+      if (_clients.TryGetValue(Client, out var tcpClient) && tcpClient.Connected)
+      {
+        tcpClient.Close();
       }
     }
 

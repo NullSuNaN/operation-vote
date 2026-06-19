@@ -11,7 +11,7 @@ namespace operation_vote.Client.Request
     public bool IsConnected => _webSocket != null && _webSocket.State == WebSocketState.Open;
 
     public event EventHandler<ReadOnlyMemory<byte>>? OnDataReceived;
-    public event EventHandler<string>? OnDisconnected;
+    public event EventHandler<Func<(string reason, bool isNormal)>>? OnDisconnected;
 
     public async Task ConnectAsync(string uri, CancellationToken cancellationToken = default)
     {
@@ -79,7 +79,7 @@ namespace operation_vote.Client.Request
 
             if (result.MessageType == WebSocketMessageType.Close)
             {
-              HandleDisconnect("Server initiated close sequence.");
+              HandleDisconnect(()=>("Server initiated close sequence.", false));
               return;
             }
 
@@ -91,14 +91,16 @@ namespace operation_vote.Client.Request
           byte[] completeMessage = messageStream.ToArray();
           OnDataReceived?.Invoke(this, new ReadOnlyMemory<byte>(completeMessage));
         }
+        HandleDisconnect(()=>("Connection closed.", true));
       }
       catch (Exception ex) when (ex is WebSocketException || ex is ObjectDisposedException || ex is OperationCanceledException)
       {
         // Expected cleanup triggers on network drop or manual cancellation
+        HandleDisconnect(()=>($"WebSocket connection closed or lost: {ex.Message}", false));
       }
-      finally
+      catch (Exception ex)
       {
-        HandleDisconnect("WebSocket connection closed or lost.");
+        HandleDisconnect(()=>($"Unexpected exception: {ex.Message}.", false));
       }
     }
 
@@ -119,11 +121,11 @@ namespace operation_vote.Client.Request
       }
       finally
       {
-        HandleDisconnect("Client requested explicit disconnect.");
+        HandleDisconnect(()=>("Client aborted the connection.", true));
       }
     }
 
-    private void HandleDisconnect(string reason)
+    private void HandleDisconnect(Func<(string reason, bool IsNormal)> reason)
     {
       if (_webSocket == null) return;
 
@@ -136,7 +138,7 @@ namespace operation_vote.Client.Request
     public void Dispose()
     {
       if (_isDisposed) return;
-      HandleDisconnect("Client is closed.");
+      HandleDisconnect(()=>("Connection closed.", true));
 
       _cts?.Cancel();
       _cts?.Dispose();
