@@ -18,10 +18,11 @@ namespace operation_vote.Server
 
     // --- API EVENTS ---
     public event EventHandler<ClientInfo>? OnClientConnected;
-    public event EventHandler<(ClientInfo ClientId, string Reason)>? OnClientDisconnected;
+    public event EventHandler<(ClientInfo Client, string Reason)>? OnClientDisconnected;
     public event EventHandler<ClientInfo>? OnClientHandshakeCompleted;
     public event EventHandler<ClientInfo>? OnClientJoined;
     public event EventHandler<(ClientInfo Client, User User)>? OnClientAuthorized;
+    public event EventHandler<(ClientInfo Client, User User)>? OnClientUnauthorized;
     public event EventHandler<(ClientInfo Client, string username)>? OnClientAuthorizeFailed;
     public event EventHandler<(ClientInfo Client, Operation ReceivedOperation)>? OnOperationReceived;
     public event EventHandler<(ClientInfo Client, Exception Error)>? OnServerErrorEncountered;
@@ -266,6 +267,8 @@ namespace operation_vote.Server
         await SendDirectAsync(item, ms.ToArray());
       }
       OnUserDeleted?.Invoke(this, (user, clients));
+      foreach (var item in clients)
+        OnClientUnauthorized?.Invoke(this, (item, user));
     }
     private async void HandleUserRegistered(object? _, User user)
     {

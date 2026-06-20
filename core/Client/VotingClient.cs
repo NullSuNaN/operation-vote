@@ -50,6 +50,7 @@ namespace operation_vote.Client
 		public AuthenticationClient.AuthenticationData? authenticationData = null;
 
 		public event EventHandler<(T, string)>? OnDisconnect;
+		public event EventHandler? OnConnectionFinished;
 		public event EventHandler<bool>? OnAuthorizationFinished;
 		private volatile int voteMultiplierCache = ProtocolInfo.ClientDefaultVoteMultiplier;
 		public int VoteMultiplier => voteMultiplierCache;
@@ -162,15 +163,15 @@ namespace operation_vote.Client
 						OnUserChanged?.Invoke(this, _authenticationData.Username);
 					}
 					OnAuthorizationFinished?.Invoke(this, authSuccess);
-
-					{ // Establish Voting
-						using var ms = new MemoryStream();
-						using var writer = new BinaryWriter(ms, Encoding.UTF8);
-						writer.Write(true);
-						writer.Write(ProtocolInfo.ClientCommands.RegisterInstanceCommand);
-						await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
-					}
 				}
+				{ // Establish Voting
+					using var ms = new MemoryStream();
+					using var writer = new BinaryWriter(ms, Encoding.UTF8);
+					writer.Write(true);
+					writer.Write(ProtocolInfo.ClientCommands.RegisterInstanceCommand);
+					await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
+				}
+				OnConnectionFinished?.Invoke(this, EventArgs.Empty);
 			}
 			catch
 			{
@@ -183,15 +184,15 @@ namespace operation_vote.Client
 			}
 		}
 
-		public async Task SendOperationAsync(Operation operation, CancellationToken token = default)
+		public async Task<bool> SendOperationAsync(Operation operation, CancellationToken token = default)
 		{
-			if (Disconnected || operation.IsDisposed) return;
+			if (Disconnected || operation.IsDisposed) return false;
 
 			using var ms = new MemoryStream();
 			using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
 			writer.Write(false);
-			operation.Serialize(writer);
+			if(!operation.Serialize(writer)) return false;
 
 			while (!Disconnected && !token.IsCancellationRequested)
 			{
@@ -200,12 +201,13 @@ namespace operation_vote.Client
 				{
 					_connectionLock.Wait(token);
 					locked = true;
-					if (operation.Type.IsDisposed || token.IsCancellationRequested) return;
+					if (operation.Type.IsDisposed || token.IsCancellationRequested) return false;
 					await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);
 					break;
 				}
 				finally { if (locked) _connectionLock.Release(); }
 			}
+			return true;
 		}
 
 		private async Task ReconnectLoopAsync()
@@ -416,7 +418,7 @@ namespace operation_vote.Client
 			}
 		}
 
-		private void HandleSocketDisconnection(object? sender, Func<string> reason)
+		private void HandleSocketDisconnection(object? sender, Func<(string reason, bool isNormal)> reason)
 		{
 			if (!Disconnected && !CancellationToken.IsCancellationRequested)
 			{
@@ -424,12 +426,20 @@ namespace operation_vote.Client
 			}
 		}
 
-		public void Dispose()
+		public async Task DisposeAsync()
 		{
 			// Thread-safe isolation check flag
 			if (Interlocked.Exchange(ref _isDisposedState, 1) == 1) return;
+			await Dispose_();
+		}
+		public void Dispose()
+		{
 			GC.SuppressFinalize(this);
-
+			if (Interlocked.Exchange(ref _isDisposedState, 1) == 1) return;
+			_ = Dispose_();
+		}
+		private async Task Dispose_()
+		{
 			_handshakeCompletionSource?.TrySetResult(false);
 
 			SocketRequestHandler.OnDataReceived -= HandleIncomingData;
@@ -437,6 +447,12 @@ namespace operation_vote.Client
 
 			try
 			{
+				using var ms = new MemoryStream();
+				using var writer = new BinaryWriter(ms, Encoding.UTF8);
+				writer.Write(true);
+				writer.Write(ProtocolInfo.ClientCommands.RegisterInstanceCommand);
+
+				await SocketRequestHandler.SendAsync(ms.ToArray(), CancellationToken).ConfigureAwait(false);
 				SocketRequestHandler.Dispose();
 			}
 			catch { }

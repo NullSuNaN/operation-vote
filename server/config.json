@@ -28,6 +28,6 @@
   "Alert": true,
   "Logging": {
     "LogLevel": "trace",
-    "LogNetworkTrace": true
+    "LogNetworkTrace": false
   }
 }

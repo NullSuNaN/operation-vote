@@ -10,6 +10,8 @@ The `client-window`, `client-browser`, `server` are all just an implementation t
 
 If the server port is not open for WLAN, you need to use `0.0.0.0` or your WLAN IP as the host.
 
+For the detail of the server configuration
+
 ## Authentication
 
 There is an anonymous user by default, which can be configured to be disabled(vote does not count) by the server.
@@ -32,11 +34,14 @@ The users on the server-side is stored in `users.db`.
 ```bash
 server # uses config.json
 server gd.json # uses gd.json
-dotnet serve -d:dist/wwwroot -p8080 -a 0.0.0.0 # serve the browser client, require dotnet-serve
+server -- gd.json # uses gd.json
+server --manager gd.json # opens the user manager with gd.json
+server --help # show help
+dotnet serve -d:dist/wwwroot -p8080 -a 0.0.0.0 # serve the browser client, require dotnet-serve tool
 client-window localhost:9055 # connect to localhost:9055 with raw TCP
 client-window localhost:9055 ws # connect to localhost:9055 with WS
 client-window localhost:9055 wss NullSuNaN 123456 # connect to localhost:9055 with WS and attempt to login as NullSuNaN
-                                                  # continue as Anonymous if the login failed
+                                                  # or continue as Anonymous if the login failed
 ```
 + Server Configuration
 ```json
@@ -65,7 +70,12 @@ client-window localhost:9055 wss NullSuNaN 123456 # connect to localhost:9055 wi
           "requireSupportRate": -0.2
         }
       ]
-    }
-  ]
+    },
+  ],
+  "Alert": false,
+  "Logging": {
+    "LogLevel": "debug",
+    "LogNetworkTrace": false
+  }
 }
 ```

@@ -33,6 +33,7 @@ namespace operation_vote.Server
 
     /// <summary>
     /// Instantiates the metrics management manager over an API-driven VotingServer instance.<br/>
+    /// The <see cref="VotingServer"/> should not be launched when initializing and launched later manually.
     /// </summary>
     public VotingManager(VotingServer server)
     {
@@ -43,40 +44,64 @@ namespace operation_vote.Server
       _server.OnClientDisconnected += HandleClientDisconnected;
       _server.OnUserRegistered += (sender, user) =>
       {
+        Console.WriteLine($"OnUserRegistered: {user.Name}");
         user.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
       };
-      _server.OnUserDeleted += (sender, e) =>
+      _server.OnClientAuthorized += (sender, e) =>
       {
-        managerLock.EnterUpgradeableReadLock();
-        var (user, clients) = e;
+        Console.WriteLine($"OnClientAuthorized: {e.User.Name}");
+        using var _ = managerLock.EnterUpgradeableReadLockAsToken();
+        var (client, user) = e;
         try
         {
           int multiplierChange = user.VoteMultiplier - _server.UnauthorizedUser.VoteMultiplier;
-          foreach (var client in clients)
-          {
-            if (_clientVotes.TryGetValue(client, out var votes))
-            {
-              foreach (var item in votes)
-                if (_tallies.TryGetValue(item.Value.Type.Id, out var tally))
-                {
-                  managerLock.EnterWriteLock();
-                  try
-                  {
-                    RemoveVoteTally(tally, item.Value.Vote, multiplierChange);
-                    OnOperationCountChanged?.Invoke(this, (item.Value.Type, tally.Voters, tally.Supporters));
-                  }
-                  finally { managerLock.ExitWriteLock(); }
-                }
-            }
-          }
+          if(multiplierChange != 0)
+            using(managerLock.EnterWriteLockAsToken())
+              ProcessVoteMultiplierChange(client, multiplierChange);
         }
-        finally { managerLock.ExitUpgradeableReadLock(); }
-        foreach (var item in server.Users.Values)
-        {
-          item.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
-        }
-        server.UnauthorizedUser.OnVoteMultiplierChange += HandleUserVoteMultiplierChange; // Anonymous is a separate field
+        finally { }
       };
+      _server.OnClientUnauthorized += (sender, e) =>
+      {
+        Console.WriteLine($"OnClientUnauthorized: {e.User.Name}");
+        using var _ = managerLock.EnterUpgradeableReadLockAsToken();
+        var (client, user) = e;
+        try
+        {
+          int multiplierChange = _server.UnauthorizedUser.VoteMultiplier - user.VoteMultiplier;
+          if(multiplierChange != 0)
+            using(managerLock.EnterWriteLockAsToken())
+              ProcessVoteMultiplierChange(client, multiplierChange);
+        }
+        finally { }
+      };
+
+      _server.OnUserDeleted += (sender, e) =>
+      {
+        Console.WriteLine($"OnUserDeleted: {e.User.Name}");
+        managerLock.EnterUpgradeableReadLock();
+        e.User.OnVoteMultiplierChange -= HandleUserVoteMultiplierChange;
+      };
+      foreach (var item in server.Users.Values)
+      {
+        item.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
+      }
+      server.UnauthorizedUser.OnVoteMultiplierChange += HandleUserVoteMultiplierChange; // Anonymous is a separate field
+    }
+    private void ProcessVoteMultiplierChange(ClientInfo client, int multiplierChange)
+    {
+      if (_clientVotes.TryGetValue(client, out var votes))
+        foreach (var item in votes)
+          if (_tallies.TryGetValue(item.Value.Type.Id, out var tally))
+          {
+            managerLock.EnterWriteLock();
+            try
+            {
+              RemoveVoteTally(tally, item.Value.Vote, multiplierChange);
+              OnOperationCountChanged?.Invoke(this, (item.Value.Type, tally.Voters, tally.Supporters));
+            }
+            finally { managerLock.ExitWriteLock(); }
+          }
     }
 
     /// <summary>
@@ -96,6 +121,34 @@ namespace operation_vote.Server
         return (0, 0);
       }
       finally { managerLock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Signal a unhandled user change to the manager. <br/>
+    /// </summary>
+    /// <remarks>
+    /// These includes:
+    /// <list>
+    ///   <item> A <c>User</c> property change of a <see cref="ClientInfo"/> from a external source instead of the server. </item>
+    ///   <item> A <see cref="IUserContainer"/> change that does not trigger either <see cref="IUserContainer.OnUserRegistered"/> or <see cref="IUserContainer.OnUserDeleted"/>. </item>
+    /// </list>
+    /// Does not include:
+    /// <list>
+    ///   <item> A user multiplier change of a client from a external source instead of the server. </item>
+    /// </list>
+    /// </remarks>
+    /// <param name="client">the client</param>
+    /// <param name="oldUser">the original user the client was linked to</param>
+    public void SignalUnhandledUserChange(ClientInfo client, User oldUser)
+    {
+      using var _ = managerLock.EnterUpgradeableReadLockAsToken();
+      if(client.User.VoteMultiplier == oldUser.VoteMultiplier) return;
+      int multiplierChange = client.User.VoteMultiplier - oldUser.VoteMultiplier;
+      try
+      {
+        ProcessVoteMultiplierChange(client, multiplierChange);
+      }
+      finally { }
     }
 
     private void HandleOperationReceived(object? sender, (ClientInfo Client, Operation ReceivedOperation) e)
@@ -178,6 +231,7 @@ namespace operation_vote.Server
     private void HandleUserVoteMultiplierChange(object? sender, (int Original, int New) e)
     {
       User user = (User?)sender ?? null!;
+      Console.WriteLine($"OnUserVoteMultiplierChange: {user.Name}: {e.Original} -> {e.New}");
       // Step 1: Snapshot the client list under a READ lock only, with NO managerLock held.
       // This avoids the lock-order inversion deadlock with the disconnect handler
       // which acquires ConnectedClientsLock then managerLock.

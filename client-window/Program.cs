@@ -5,6 +5,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using operation_vote.Client;
 using operation_vote.Client.Request;
 using operation_vote.Interface.Shared;
+using operation_vote.Shared;
 
 namespace operation_vote.Interface.ClientWindow
 {
@@ -50,12 +51,10 @@ namespace operation_vote.Interface.ClientWindow
 
     // Thread-safe state tracking for the modern AFK logic
     private readonly ConcurrentDictionary<string, Operation.OperationType> _keyOpMapping = new();
-    private long _lastClickTicks = DateTime.UtcNow.Ticks;
-    private SortedList<TimeSpan, Operation.OperationType>? _timeouts = null;
-    private readonly SemaphoreSlim _afkSignal = new(0, 1);
-    private readonly ReaderWriterLockSlim _afkLock = new();
-    private Task? _afkLoopTask;
-    private CancellationTokenSource? _afkCts;
+
+    private ClientHelper.AfkProcessor AfkProcessor = null!;
+		private ClientHelper.OperationManager<T> operationManager = null!;
+
 
     [STAThread]
     public void Main(string[] args, AuthenticationClient.AuthenticationData? authenticationData, string uri)
@@ -63,8 +62,7 @@ namespace operation_vote.Interface.ClientWindow
       Console.WriteLine("=== STARTING VOTING CLIENT RUNTIME DOMAIN ===");
 
       _cts = new CancellationTokenSource();
-      _afkCts = new CancellationTokenSource();
-      _afkLoopTask = AFKProcessingThreadAsync(_afkCts.Token);
+      AfkProcessor = ClientHelper.AfkProcessor.LaunchAfkProcessor();
 
       // Create the app builder setup
       var appBuilder = AppBuilder.Configure<Application>()
@@ -85,12 +83,12 @@ namespace operation_vote.Interface.ClientWindow
           };
 
           // Hard shutdown handle to clean up background tasks instantly on exit
-          desktop.ShutdownRequested += (sender, e) =>
+          desktop.ShutdownRequested += async(sender, e) =>
           {
             Console.WriteLine("UI Shutdown requested. Cleaning up core assets...");
             CleanupBackgroundTasks();
             _cts?.Cancel();
-            _client?.Dispose();
+            _client?.DisposeAsync();
             _socketHandler?.Dispose();
           };
         }
@@ -107,78 +105,12 @@ namespace operation_vote.Interface.ClientWindow
       Console.WriteLine("=== RUNTIME DOMAIN EXITED ===");
     }
 
-    private void CleanupBackgroundTasks()
-    {
-      try { _afkCts?.Cancel(); } catch { /* no-op */ }
-      try { _afkCts?.Dispose(); } catch { /* no-op */ }
-      try { _afkSignal?.Dispose(); } catch { /* no-op */ }
-      try { _afkLock?.Dispose(); } catch { /* no-op */ }
-    }
+    private void CleanupBackgroundTasks() => AfkProcessor?.Dispose();
 
     public void TrackUserActivity()
     {
-      Interlocked.Exchange(ref _lastClickTicks, DateTime.UtcNow.Ticks);
-      try { _afkSignal.Release(); } catch { /* no-op */ }
-    }
-
-    private async Task AFKProcessingThreadAsync(CancellationToken token)
-    {
-      while (!token.IsCancellationRequested)
-      {
-        SortedList<TimeSpan, Operation.OperationType>? localTimeouts;
-        long clickTicks;
-
-        _afkLock.EnterReadLock();
-        try
-        {
-          localTimeouts = _timeouts;
-          clickTicks = Volatile.Read(ref _lastClickTicks);
-        }
-        finally
-        {
-          _afkLock.ExitReadLock();
-        }
-
-        if (localTimeouts == null)
-        {
-          try { await _afkSignal.WaitAsync(token); } catch (OperationCanceledException) { break; }
-          continue;
-        }
-
-        DateTime lastClickTime = new(Volatile.Read(ref clickTicks), DateTimeKind.Utc);
-        TimeSpan lowestWait = TimeSpan.MaxValue;
-        Operation.OperationType operationType;
-
-        foreach (var item in localTimeouts)
-        {
-          TimeSpan calculatedDeadline = item.Key;
-          TimeSpan elapsed = DateTime.UtcNow - lastClickTime;
-          TimeSpan remainingWait = calculatedDeadline - elapsed;
-
-          if (remainingWait <= TimeSpan.Zero)
-          {
-            operationType=item.Value;
-            break;
-          }
-          else if (remainingWait < lowestWait)
-          {
-            operationType=item.Value;
-            lowestWait = remainingWait;
-          }
-        }
-        {
-          int waitMilliseconds = lowestWait == TimeSpan.MaxValue ? -1 : (int)lowestWait.TotalMilliseconds;
-          try
-          {
-            await _afkSignal.WaitAsync(waitMilliseconds, token);
-            
-          }
-          catch (OperationCanceledException)
-          {
-            break;
-          }
-        }
-      }
+      Interlocked.Exchange(ref AfkProcessor.LastClickTicks, DateTime.UtcNow.Ticks);
+      try { AfkProcessor.AfkSignal.Release(); } catch { /* no-op */ }
     }
 
     private async Task InitializeAndShowUIAsync(string uri, AuthenticationClient.AuthenticationData? authenticationData, IClassicDesktopStyleApplicationLifetime desktop)
@@ -191,6 +123,11 @@ namespace operation_vote.Interface.ClientWindow
         _client = new VotingClient<T>(socketHandler, uri, _cts.Token)
         {
           authenticationData=authenticationData
+        };
+        operationManager = ClientHelper.OperationManager<T>.CreateManager(_client, out var parsedTimeouts);
+        operationManager.OnOperationsReloaded += (sender, e) => {
+          using(AfkProcessor.AfkLock.EnterWriteLockAsToken())
+            AfkProcessor.SetTimeouts(e.ParsedTimeout);
         };
 
         Console.WriteLine($"Connecting to network node at {uri}...");
@@ -216,40 +153,14 @@ namespace operation_vote.Interface.ClientWindow
         await _client.ConnectAsync();
         Console.WriteLine("Handshake completed. Server connection initialized successfully.");
 
-        var availableOpTypes = _client.OperationTypes.Values.ToList();
-        var parsedTimeouts = new SortedList<TimeSpan, Operation.OperationType>();
 
-        foreach (var opType in availableOpTypes)
-        {
-          if (opType?.Instructions == null || opType.Instructions.Length == 0) continue;
+        using(AfkProcessor.AfkLock.EnterWriteLockAsToken())
+          AfkProcessor.SetTimeouts(parsedTimeouts);
 
-          var (instructionsStrings, afk) = InstructionsProtocol.DeserializeInstructions(opType.Instructions);
+        Interlocked.Exchange(ref AfkProcessor.LastClickTicks, DateTime.UtcNow.Ticks);
+        try { AfkProcessor.AfkSignal.Release(); } catch { /* no-op */ }
 
-          foreach (string key in instructionsStrings)
-          {
-            if (!string.IsNullOrEmpty(key)) _keyOpMapping[key] = opType;
-          }
-
-          if (afk != null)
-          {
-            parsedTimeouts[afk.Value] = opType;
-          }
-        }
-
-        _afkLock.EnterWriteLock();
-        try
-        {
-          _timeouts = parsedTimeouts;
-        }
-        finally
-        {
-          _afkLock.ExitWriteLock();
-        }
-
-        Interlocked.Exchange(ref _lastClickTicks, DateTime.UtcNow.Ticks);
-        try { _afkSignal.Release(); } catch { /* no-op */ }
-
-        var window = new VotingWindow<T>(_client, _keyOpMapping, TrackUserActivity);
+        var window = new VotingWindow<T>(_client, operationManager, TrackUserActivity);
         desktop.MainWindow = window; 
         
         // Explicitly show the window inside the lifecycle loop

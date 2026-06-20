@@ -21,19 +21,18 @@ namespace operation_vote.Interface.ClientWindow
 		public readonly VotingClient<T> Client;
 		private readonly CancellationTokenSource DisconnectCts = new();
 		private readonly CancellationTokenSource PressToCloseCts = new();
-		private volatile CancellationTokenSource SendOpCts = new();
 		private bool _readyToForceClose = false;
 		private bool isBanned = false;
-		private readonly ReaderWriterLockSlim keyOpReady = new();
-		private ReaderWriterLockSlimToken? keyOpReadyToken = null;
+		private readonly ClientHelper.OperationManager<T> OperationManager;
 
-		public VotingWindow(VotingClient<T> client, ConcurrentDictionary<string, Operation.OperationType> keyOp, Action trackActivity)
+		public VotingWindow(VotingClient<T> client, ClientHelper.OperationManager<T> operationManager, Action trackActivity)
 		{
 			Title = "Operation Voting Client";
 			Width = 400;
 			Height = 200;
 			WindowStartupLocation = WindowStartupLocation.CenterScreen;
 			Client = client;
+			OperationManager = operationManager;
 
 			Background = Brushes.DimGray;
 			TransparencyLevelHint = [WindowTransparencyLevel.None];
@@ -84,16 +83,6 @@ namespace operation_vote.Interface.ClientWindow
 					(_userLabel.Text, _userLabel.Foreground) = GetUserLabel()
 				);
 			};
-			client.BeforeOperationsReload += (sender, __) =>
-			{
-				SendOpCts.Cancel();
-				keyOpReadyToken = keyOpReady.EnterWriteLockAsToken();
-			};
-			client.AfterOperationsReload += (sender, __) =>
-			{
-				Interlocked.Exchange(ref keyOpReadyToken, null)?.Dispose();
-				SendOpCts=new();
-			};
 			isBanned = client.VoteMultiplier == 0;
 
 			mainContainer.Children.Add(_statusLabel);
@@ -118,15 +107,17 @@ namespace operation_vote.Interface.ClientWindow
 				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
-				using (keyOpReady.EnterReadLockAsToken())
-					if (keyOp.TryGetValue(keyStr, out var targetedOpType))
-						if (_pressedKeysState.TryAdd(key, e))
-						{
-							var supportOp = new Operation(targetedOpType, VoteType.Support, []);
-							var sendTask = client.SendOperationAsync(supportOp, SendOpCts.Token);
-							_statusLabel.Text = GetStatusLabel();
-							await sendTask;
-						}
+				await operationManager.RunWithOpType(async data =>
+				{
+					if (data != null && _pressedKeysState.TryAdd(key, e))
+					{
+						var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
+						var sendTask = client.SendOperationAsync(supportOp, data.Value.CancellationToken);
+						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
+						if (!await sendTask)
+							await client.DisposeAsync();
+					}
+				}, keyStr);
 			};
 
 			// KEY UP
@@ -136,15 +127,17 @@ namespace operation_vote.Interface.ClientWindow
 				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
-				using (keyOpReady.EnterReadLockAsToken())
-					if (keyOp.TryGetValue(keyStr, out var targetedOpType))
-						if (_pressedKeysState.Remove(key))
-						{
-							var againstOp = new Operation(targetedOpType, VoteType.Against, []);
-							var sendTask = client.SendOperationAsync(againstOp, SendOpCts.Token);
-							_statusLabel.Text = GetStatusLabel();
-							await sendTask;
-						}
+				await operationManager.RunWithOpType(async data =>
+				{
+					if (data != null && _pressedKeysState.Remove(key))
+					{
+						var againstOp = new Operation(data.Value.Type, VoteType.Against, []);
+						var sendTask = client.SendOperationAsync(againstOp, data.Value.CancellationToken);
+						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
+						if (!await sendTask)
+							await client.DisposeAsync();
+					}
+				}, keyStr);
 			};
 
 			PointerPressed += async (sender, e) =>
@@ -152,15 +145,17 @@ namespace operation_vote.Interface.ClientWindow
 				if (DisconnectCts.IsCancellationRequested) return;
 				trackActivity();
 				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
-				using (keyOpReady.EnterReadLockAsToken())
-					if (keyOp.TryGetValue(button.ToString(), out var targetedOpType))
-						if (_pressedMouseButtonState.Add(button))
-						{
-							var supportOp = new Operation(targetedOpType, VoteType.Support, []);
-							var sendTask = client.SendOperationAsync(supportOp, SendOpCts.Token);
-							_statusLabel.Text = GetStatusLabel();
-							await sendTask;
-						}
+				await operationManager.RunWithOpType(async data =>
+				{
+					if (data != null && _pressedMouseButtonState.Add(button))
+					{
+						var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
+						var sendTask = client.SendOperationAsync(supportOp, data.Value.CancellationToken);
+						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
+						if (!await sendTask)
+							await client.DisposeAsync();
+					}
+				}, button.ToString());
 			};
 
 			PointerReleased += async (sender, e) =>
@@ -168,15 +163,17 @@ namespace operation_vote.Interface.ClientWindow
 				if (DisconnectCts.IsCancellationRequested) return;
 				trackActivity();
 				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
-				using (keyOpReady.EnterReadLockAsToken())
-					if (keyOp.TryGetValue(button.ToString(), out var targetedOpType))
-						if (_pressedMouseButtonState.Remove(button))
-						{
-							var against = new Operation(targetedOpType, VoteType.Against, []);
-							var sendTask = client.SendOperationAsync(against, SendOpCts.Token);
-							_statusLabel.Text = GetStatusLabel();
-							await sendTask;
-						}
+				await operationManager.RunWithOpType(async data =>
+				{
+					if (data != null && _pressedMouseButtonState.Remove(button))
+					{
+						var against = new Operation(data.Value.Type, VoteType.Against, []);
+						var sendTask = client.SendOperationAsync(against, data.Value.CancellationToken);
+						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
+						if (!await sendTask)
+							await client.DisposeAsync();
+					}
+				}, button.ToString());
 			};
 		}
 		public string GetStatusLabel()

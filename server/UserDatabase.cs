@@ -297,16 +297,17 @@ namespace operation_vote.Interface.Server
     }
     #region Console Manager Tool
 
-    public static void RunConsoleManager(UserDatabase? userDB = null) =>
-        ConsoleManager.Run(userDB);
+    public static void RunConsoleManager(UserDatabase? userDB = null, VotingManager? manager = null) =>
+        ConsoleManager.Run(userDB, manager);
 
     private static class ConsoleManager
     {
       private static bool _strictMode = false;
 
-      public static void Run(UserDatabase? userDB = null)
+      public static void Run(UserDatabase? userDB = null, VotingManager? manager = null)
       {
-        using var db = userDB ?? new UserDatabase();
+        var db = userDB ?? [];
+        using var _ = userDB == null ? db : null;
         bool running = true;
 
         while (running)
@@ -352,7 +353,7 @@ namespace operation_vote.Interface.Server
               ListUserConnections(db);
               break;
             case "7":
-              UnauthorizeUserConnections(db);
+              UnauthorizeUserConnections(db, manager);
               break;
             case "8":
               ConfigureAnonymous(db);
@@ -513,7 +514,8 @@ namespace operation_vote.Interface.Server
         try
         {
           // Atomically apply parameters to existing live reference safely via the indexer update flow
-          db[username] = new User(Name: username, ApiKey: targetApiKey, VoteMultiplier: targetMultiplier);
+          if (db.TryGetValue(username, out User? modifiedUser))
+            modifiedUser.Set(ApiKey: targetApiKey, VoteMultiplier: targetMultiplier);
           Console.WriteLine($"Success: User parameters updated for '{username}'.");
         }
         catch (Exception ex)
@@ -567,7 +569,7 @@ namespace operation_vote.Interface.Server
         }
       }
 
-      private static void UnauthorizeUserConnections(UserDatabase db)
+      private static void UnauthorizeUserConnections(UserDatabase db, VotingManager? manager)
       {
         Console.WriteLine("--- Unauthorize All Live Client Connections ---");
         Console.Write("Enter Target Username: ");
@@ -591,6 +593,7 @@ namespace operation_vote.Interface.Server
               {
                 // Re-route connection to Program's global tracking or a blank user structure
                 client.User = db.AnonymousUser;
+                manager?.SignalUnhandledUserChange(client, user);
               }
             }
           }

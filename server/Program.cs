@@ -204,10 +204,10 @@ namespace operation_vote.Interface.Server
 
       var server = new VotingServer(transportCluster, operationalSuite, userDB);
 
-      server.OnClientConnected += (sender, clientId) => ServerLogger.logger.LogDebug(() => $"[Cluster Joined] Client ID: {clientId}");
-      server.OnClientHandshakeCompleted += (sender, clientId) => ServerLogger.logger.LogDebug(() => $"[Handshake Verified] Client {clientId} initialized successfully.");
-      server.OnClientDisconnected += (sender, e) => ServerLogger.logger.LogDebug(() => $"[Cluster Left] Client ID: {e.ClientId}. Reason: {e.Reason}");
-      server.OnClientAuthorized += (sender, e) => ServerLogger.logger.LogDebug(() => $"[Authorizing] Client ID: {e.Client}. User: {e.User.Name}");
+      server.OnClientConnected += (sender, client) => ServerLogger.logger.LogDebug(() => $"[Cluster Joined] Client ID: {client.ClientId}");
+      server.OnClientHandshakeCompleted += (sender, client) => ServerLogger.logger.LogDebug(() => $"[Handshake Verified] Client {client.ClientId} initialized successfully.");
+      server.OnClientDisconnected += (sender, e) => ServerLogger.logger.LogDebug(() => $"[Cluster Left] Client ID: {e.Client.ClientId}. Reason: {e.Reason}");
+      server.OnClientAuthorized += (sender, e) => ServerLogger.logger.LogDebug(() => $"[Authorizing] Client ID: {e.Client.ClientId}. User: {e.User.Name}");
 
       var voteManager = new VotingManager(server);
       voteManager.OnOperationCountChanged += (sender, data) =>
@@ -239,7 +239,7 @@ namespace operation_vote.Interface.Server
             Console.WriteLine("you can use `help` to get help.");
             break;
           case "manager":
-            UserDatabase.RunConsoleManager(userDB);
+            UserDatabase.RunConsoleManager(userDB, voteManager);
             break;
           case "exit":
             readContinue = false;
