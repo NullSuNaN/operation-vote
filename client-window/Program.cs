@@ -5,7 +5,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using operation_vote.Client;
 using operation_vote.Client.Request;
 using operation_vote.Interface.Shared;
-using operation_vote.Shared;
+using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Interface.ClientWindow
 {
@@ -16,7 +16,7 @@ namespace operation_vote.Interface.ClientWindow
     {
       if (args.Length < 1)
       {
-        Console.WriteLine("Usage: client-window <uri:(ip[:port])> [<protocol:tcp|ws|wss>(tcp)] [<username:string?>(null:unauthorized)] [<password:string>(42)]");
+        Console.WriteLine("Usage: client-window <uri:(ip[:port])> [<protocol:tcp|ws|wss>(\"tcp\")] [<username:string?>(null:unauthorized)] [<password:string>(\"42\")]");
         return;
       }
       var uri = args[0];
@@ -52,7 +52,7 @@ namespace operation_vote.Interface.ClientWindow
     // Thread-safe state tracking for the modern AFK logic
     private readonly ConcurrentDictionary<string, Operation.OperationType> _keyOpMapping = new();
 
-    private ClientHelper.AfkProcessor AfkProcessor = null!;
+    private ClientHelper.AfkProcessor<T> AfkProcessor = null!;
 		private ClientHelper.OperationManager<T> operationManager = null!;
 
 
@@ -62,7 +62,6 @@ namespace operation_vote.Interface.ClientWindow
       Console.WriteLine("=== STARTING VOTING CLIENT RUNTIME DOMAIN ===");
 
       _cts = new CancellationTokenSource();
-      AfkProcessor = ClientHelper.AfkProcessor.LaunchAfkProcessor();
 
       // Create the app builder setup
       var appBuilder = AppBuilder.Configure<Application>()
@@ -107,12 +106,6 @@ namespace operation_vote.Interface.ClientWindow
 
     private void CleanupBackgroundTasks() => AfkProcessor?.Dispose();
 
-    public void TrackUserActivity()
-    {
-      Interlocked.Exchange(ref AfkProcessor.LastClickTicks, DateTime.UtcNow.Ticks);
-      try { AfkProcessor.AfkSignal.Release(); } catch { /* no-op */ }
-    }
-
     private async Task InitializeAndShowUIAsync(string uri, AuthenticationClient.AuthenticationData? authenticationData, IClassicDesktopStyleApplicationLifetime desktop)
     {
       try
@@ -124,10 +117,10 @@ namespace operation_vote.Interface.ClientWindow
         {
           authenticationData=authenticationData
         };
+        AfkProcessor = ClientHelper.AfkProcessor<T>.LaunchAfkProcessor(_client);
         operationManager = ClientHelper.OperationManager<T>.CreateManager(_client, out var parsedTimeouts);
         operationManager.OnOperationsReloaded += (sender, e) => {
-          using(AfkProcessor.AfkLock.EnterWriteLockAsToken())
-            AfkProcessor.SetTimeouts(e.ParsedTimeout);
+          AfkProcessor.SetTimeouts(e.ParsedTimeout);
         };
 
         Console.WriteLine($"Connecting to network node at {uri}...");
@@ -153,14 +146,7 @@ namespace operation_vote.Interface.ClientWindow
         await _client.ConnectAsync();
         Console.WriteLine("Handshake completed. Server connection initialized successfully.");
 
-
-        using(AfkProcessor.AfkLock.EnterWriteLockAsToken())
-          AfkProcessor.SetTimeouts(parsedTimeouts);
-
-        Interlocked.Exchange(ref AfkProcessor.LastClickTicks, DateTime.UtcNow.Ticks);
-        try { AfkProcessor.AfkSignal.Release(); } catch { /* no-op */ }
-
-        var window = new VotingWindow<T>(_client, operationManager, TrackUserActivity);
+        var window = new VotingWindow<T>(_client, operationManager, AfkProcessor);
         desktop.MainWindow = window; 
         
         // Explicitly show the window inside the lifecycle loop

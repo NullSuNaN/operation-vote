@@ -3,6 +3,7 @@ using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using operation_vote.Client;
@@ -17,15 +18,17 @@ namespace operation_vote.Interface.ClientWindow
 		private readonly TextBlock _statusLabel;
 		private readonly TextBlock _userLabel;
 		private readonly Dictionary<Key, KeyEventArgs> _pressedKeysState = [];
-		private readonly HashSet<KeyMappingExtensions.MouseButton> _pressedMouseButtonState = [];
+		private readonly HashSet<MouseButton> _pressedMouseButtonState = [];
 		public readonly VotingClient<T> Client;
 		private readonly CancellationTokenSource DisconnectCts = new();
 		private readonly CancellationTokenSource PressToCloseCts = new();
+		private readonly ClientHelper.AfkProcessor<T> AfkProcessor;
 		private bool _readyToForceClose = false;
 		private bool isBanned = false;
 		private readonly ClientHelper.OperationManager<T> OperationManager;
+		private readonly ConcurrentDictionary<Key, object?> _currentlyHeldKeys = [];
 
-		public VotingWindow(VotingClient<T> client, ClientHelper.OperationManager<T> operationManager, Action trackActivity)
+		public VotingWindow(VotingClient<T> client, ClientHelper.OperationManager<T> operationManager, ClientHelper.AfkProcessor<T> afkProcessor)
 		{
 			Title = "Operation Voting Client";
 			Width = 400;
@@ -33,6 +36,7 @@ namespace operation_vote.Interface.ClientWindow
 			WindowStartupLocation = WindowStartupLocation.CenterScreen;
 			Client = client;
 			OperationManager = operationManager;
+			AfkProcessor = afkProcessor;
 
 			Background = Brushes.DimGray;
 			TransparencyLevelHint = [WindowTransparencyLevel.None];
@@ -60,7 +64,6 @@ namespace operation_vote.Interface.ClientWindow
 				Foreground = Brushes.Gray,
 				TextWrapping = TextWrapping.Wrap
 			};
-			(_userLabel.Text, _userLabel.Foreground) = GetUserLabel();
 			var mainContainer = new StackPanel
 			{
 				HorizontalAlignment = HorizontalAlignment.Center,
@@ -70,7 +73,7 @@ namespace operation_vote.Interface.ClientWindow
 			client.OnVoteMultiplierChange += (sender, e) =>
 			{
 				bool _isBanned = e.New == 0;
-				if (Interlocked.Exchange(ref isBanned, _isBanned) != _isBanned || true)
+				if (Interlocked.Exchange(ref isBanned, _isBanned) != _isBanned)
 				{
 					Avalonia.Threading.Dispatcher.UIThread.Post(() =>
 						(_userLabel.Text, _userLabel.Foreground) = GetUserLabel()
@@ -84,6 +87,9 @@ namespace operation_vote.Interface.ClientWindow
 				);
 			};
 			isBanned = client.VoteMultiplier == 0;
+			Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+				(_userLabel.Text, _userLabel.Foreground) = GetUserLabel()
+			);
 
 			mainContainer.Children.Add(_statusLabel);
 			mainContainer.Children.Add(_userLabel);
@@ -93,8 +99,9 @@ namespace operation_vote.Interface.ClientWindow
 			client.OnDisconnect += (sender, e) => Avalonia.Threading.Dispatcher.UIThread.Post(HandleDisconnect);
 
 			// KEY DOWN
-			KeyDown += async (sender, e) =>
+			AddHandler(KeyDownEvent, async (sender, e) =>
 			{
+				if (!_currentlyHeldKeys.TryAdd(e.Key, null)) return;
 				if (DisconnectCts.IsCancellationRequested)
 				{
 					if (_readyToForceClose)
@@ -104,7 +111,6 @@ namespace operation_vote.Interface.ClientWindow
 					return;
 				}
 
-				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
 				await operationManager.RunWithOpType(async data =>
@@ -112,19 +118,25 @@ namespace operation_vote.Interface.ClientWindow
 					if (data != null && _pressedKeysState.TryAdd(key, e))
 					{
 						var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
-						var sendTask = client.SendOperationAsync(supportOp, data.Value.CancellationToken);
+						Task<bool>? sendTask = null;
+						AfkProcessor.UpdateAfk(
+							token => sendTask = client.SendOperationAsync(supportOp, token),
+							data.Value.Type,
+							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask)
+						if (!await sendTask!)
 							await client.DisposeAsync();
 					}
+					else
+						AfkProcessor.UpdateAfk(null);
 				}, keyStr);
-			};
+			});
 
 			// KEY UP
-			KeyUp += async (sender, e) =>
+			AddHandler(KeyUpEvent, async (sender, e) =>
 			{
+				if (!_currentlyHeldKeys.TryRemove(e.Key, out _)) return;
 				if (DisconnectCts.IsCancellationRequested) return;
-				trackActivity();
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
 				await operationManager.RunWithOpType(async data =>
@@ -132,49 +144,69 @@ namespace operation_vote.Interface.ClientWindow
 					if (data != null && _pressedKeysState.Remove(key))
 					{
 						var againstOp = new Operation(data.Value.Type, VoteType.Against, []);
-						var sendTask = client.SendOperationAsync(againstOp, data.Value.CancellationToken);
+						Task<bool>? sendTask = null;
+						AfkProcessor.UpdateAfk(
+							token => sendTask = client.SendOperationAsync(againstOp, token),
+							data.Value.Type,
+							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask)
-							await client.DisposeAsync();
+						try
+						{
+							if (!await sendTask!)
+								await client.DisposeAsync();
+						}
+						catch (TaskCanceledException) {}
 					}
+					else
+						AfkProcessor.UpdateAfk(null);
 				}, keyStr);
-			};
+			});
 
-			PointerPressed += async (sender, e) =>
+			AddHandler(PointerPressedEvent, async (sender, e) =>
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
-				trackActivity();
-				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
+				var button = e.GetCurrentPoint(this).Properties.PointerUpdateKind.GetMouseButton();
 				await operationManager.RunWithOpType(async data =>
 				{
 					if (data != null && _pressedMouseButtonState.Add(button))
 					{
 						var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
-						var sendTask = client.SendOperationAsync(supportOp, data.Value.CancellationToken);
+						Task<bool>? sendTask = null;
+						AfkProcessor.UpdateAfk(
+							token => sendTask = client.SendOperationAsync(supportOp, token),
+							data.Value.Type,
+							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask)
+						if (!await sendTask!)
 							await client.DisposeAsync();
 					}
-				}, button.ToString());
-			};
+					else
+						AfkProcessor.UpdateAfk(null);
+				}, KeyMappingExtensions.GetMouseButtonName(button));
+			});
 
-			PointerReleased += async (sender, e) =>
+			AddHandler(PointerReleasedEvent, async (sender, e) =>
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
-				trackActivity();
-				var button = KeyMappingExtensions.GetMouseButtonName(e.Properties);
+				var button = e.InitialPressMouseButton;
 				await operationManager.RunWithOpType(async data =>
 				{
 					if (data != null && _pressedMouseButtonState.Remove(button))
 					{
-						var against = new Operation(data.Value.Type, VoteType.Against, []);
-						var sendTask = client.SendOperationAsync(against, data.Value.CancellationToken);
+						var againstOp = new Operation(data.Value.Type, VoteType.Against, []);
+						Task<bool>? sendTask = null;
+						AfkProcessor.UpdateAfk(
+							token => sendTask = client.SendOperationAsync(againstOp, token),
+							data.Value.Type,
+							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask)
+						if (!await sendTask!)
 							await client.DisposeAsync();
 					}
-				}, button.ToString());
-			};
+					else
+						AfkProcessor.UpdateAfk(null);
+				}, KeyMappingExtensions.GetMouseButtonName(button));
+			});
 		}
 		public string GetStatusLabel()
 		{
@@ -242,6 +274,7 @@ namespace operation_vote.Interface.ClientWindow
 			// Fire off a non-blocking background wait operation
 			_ = WaitForKeyCloseAsync();
 		}
+
 
 		private async Task WaitForKeyCloseAsync()
 		{

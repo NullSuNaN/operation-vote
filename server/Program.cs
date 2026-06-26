@@ -102,11 +102,12 @@ namespace operation_vote.Interface.Server
       catch (Exception ex)
       {
         Console.ForegroundColor = ConsoleColor.Red;
-        ServerLogger.logger.LogInformation(() => $"[Fatal System Crash] Runtime config parse failure: {ex.Message}");
+        ServerLogger.logger.LogInformation(() => $"[Fatal System Crash] {ex.Message}");
         if (ex.InnerException != null)
         {
           ServerLogger.logger.LogInformation(() => $"Details: {ex.InnerException.Message}");
         }
+        ServerLogger.logger.LogTrace(() => ex.StackTrace);
         Console.ResetColor();
       }
       return 0;
@@ -239,7 +240,7 @@ namespace operation_vote.Interface.Server
             Console.WriteLine("you can use `help` to get help.");
             break;
           case "manager":
-            UserDatabase.RunConsoleManager(userDB, voteManager);
+            UserDatabase.RunConsoleManager(userDB, server);
             break;
           case "exit":
             readContinue = false;
@@ -258,7 +259,7 @@ namespace operation_vote.Interface.Server
             Console.WriteLine("manager        - open user manager");
             break;
           default:
-            Console.WriteLine($"Invalid command: {command}, you can use `help` to get help.");
+            Console.WriteLine($"Invalid command: {string.Concat(command)}, you can use `help` to get help.");
             break;
         }
       }

@@ -1,4 +1,5 @@
 using operation_vote.Server.Network;
+using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Server
 {
@@ -9,60 +10,49 @@ namespace operation_vote.Server
   /// <param name="User">User data, null if it is not authenticated.</param>
   public class ClientInfo(IServerChannel Channel, Guid ClientId, User User, TaskCompletionSource<byte[]> UserAuthenticationResult = null!)
   {
-    private IServerChannel channel = Channel;
-    private Guid clientId = ClientId;
+    public IServerChannel Channel = Channel;
+    public Guid ClientId = ClientId;
     private User user = User;
     private TaskCompletionSource<byte[]> userAuthenticationResult = UserAuthenticationResult ?? new();
-    public readonly ReaderWriterLockSlim infoLock = new(LockRecursionPolicy.SupportsRecursion);
-    public bool Initialized {get; private set;} = false;
+    public readonly ReaderWriterLockSlim userLock = new(LockRecursionPolicy.SupportsRecursion);
+    public bool Initialized { get; private set; } = false;
     private T GetProperty<T>(ref T field)
     {
-      infoLock.EnterReadLock();
-      try
-      {
+      using(userLock.EnterReadLockAsToken())
         return field;
-      }
-      finally
-      {
-        infoLock.ExitReadLock();
-      }
     }
     private void SetProperty<T>(ref T field, T value)
     {
-      infoLock.EnterWriteLock();
-      try
-      {
-        field=value;
-      }
-      finally
-      {
-        infoLock.ExitWriteLock();
-      }
+      using(userLock.EnterWriteLockAsToken())
+        field = value;
     }
-    public IServerChannel Channel {
-      get => GetProperty(ref channel);
-      set => SetProperty(ref channel, value);
-    }
-    public Guid ClientId {
-      get => GetProperty(ref clientId);
-      set => SetProperty(ref clientId, value);
-    }
-    public User User {
+    public User User
+    {
       get => GetProperty(ref user);
       set
       {
-        infoLock.EnterWriteLock();
+        userLock.EnterWriteLock();
         try
         {
           user.ConnectedClients.TryRemove(this, out _);
           value.ConnectedClients.TryAdd(this, null);
-          user=value;
+          user = value;
         }
         finally
         {
-          infoLock.ExitWriteLock();
+          userLock.ExitWriteLock();
         }
       }
+    }
+    public IServerChannel ExchangeChannel(IServerChannel value) => Interlocked.Exchange(ref Channel, value);
+    public Guid ExchangeClientId(Guid value) => Interlocked.Exchange(ref ClientId, value);
+    public User ExchangeUser(User value)
+    {
+      using var __ = userLock.EnterWriteLockAsToken();
+      if(user == value) return user;
+      user.ConnectedClients.TryRemove(this, out _);
+      value.ConnectedClients.TryAdd(this, null);
+      return Interlocked.Exchange(ref user, value);
     }
     public TaskCompletionSource<byte[]> UserAuthenticationResult => GetProperty(ref userAuthenticationResult);
 

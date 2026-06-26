@@ -1,6 +1,6 @@
-using System.Runtime.CompilerServices;
 using System.Text;
 using operation_vote.Shared;
+using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Client
 {
@@ -9,7 +9,7 @@ namespace operation_vote.Client
     /// <remarks>
     /// Access within <see cref="OpTypeLock" />
     /// </remarks>
-    public class OperationType : IDisposable
+    public class OperationType : IDisposable, IComparable<OperationType>
     {
       public readonly VotingEnv Env;
       public readonly long Id;
@@ -28,6 +28,12 @@ namespace operation_vote.Client
       {
         GC.SuppressFinalize(this);
         IsDisposed = true;
+      }
+
+      public int CompareTo(OperationType? other)
+      {
+        if(other is null) return 1;
+        return Id.CompareTo(other.Id);
       }
     }
 

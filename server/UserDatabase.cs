@@ -2,7 +2,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using operation_vote.Server;
-using operation_vote.Shared;
+using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Interface.Server
 {
@@ -297,14 +297,14 @@ namespace operation_vote.Interface.Server
     }
     #region Console Manager Tool
 
-    public static void RunConsoleManager(UserDatabase? userDB = null, VotingManager? manager = null) =>
-        ConsoleManager.Run(userDB, manager);
+    public static void RunConsoleManager(UserDatabase? userDB = null, VotingServer? server = null) =>
+        ConsoleManager.Run(userDB, server);
 
     private static class ConsoleManager
     {
       private static bool _strictMode = false;
 
-      public static void Run(UserDatabase? userDB = null, VotingManager? manager = null)
+      public static void Run(UserDatabase? userDB = null, VotingServer? server = null)
       {
         var db = userDB ?? [];
         using var _ = userDB == null ? db : null;
@@ -353,7 +353,7 @@ namespace operation_vote.Interface.Server
               ListUserConnections(db);
               break;
             case "7":
-              UnauthorizeUserConnections(db, manager);
+              UnauthorizeUserConnections(db, server);
               break;
             case "8":
               ConfigureAnonymous(db);
@@ -569,7 +569,7 @@ namespace operation_vote.Interface.Server
         }
       }
 
-      private static void UnauthorizeUserConnections(UserDatabase db, VotingManager? manager)
+      private static void UnauthorizeUserConnections(UserDatabase db, VotingServer? server)
       {
         Console.WriteLine("--- Unauthorize All Live Client Connections ---");
         Console.Write("Enter Target Username: ");
@@ -586,16 +586,14 @@ namespace operation_vote.Interface.Server
             var activeClients = user.ConnectedClients.Keys.ToList();
             totalDisconnected = activeClients.Count;
 
+            List<Task<User>> ExchangeUserTasks = [];
             foreach (var client in activeClients)
             {
-              // Forcefully isolate the connection from the authenticated profile
-              if (user.ConnectedClients.TryRemove(client, out _))
-              {
-                // Re-route connection to Program's global tracking or a blank user structure
-                client.User = db.AnonymousUser;
-                manager?.SignalUnhandledUserChange(client, user);
-              }
+              Task<User>? currentTask = server?.ExchangeUser(client, db.AnonymousUser);
+              if(currentTask != null)
+                ExchangeUserTasks.Add(currentTask);
             }
+            Task.WaitAll(ExchangeUserTasks);
           }
 
           Console.WriteLine($"Action Completed: Displaced {totalDisconnected} active tracking connection links from user '{username}'.");

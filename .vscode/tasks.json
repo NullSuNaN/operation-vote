@@ -6,14 +6,21 @@
       "task": "build ${cwd}/client-window/client-window.csproj",
       "file": "${cwd}/client-window/client-window.csproj",
       "group": "build",
-      "label": "dotnet: build client-window.csproj",
+      "label": "dotnet: build client-window.csproj"
     },
     {
       "type": "dotnet",
       "task": "build ${cwd}/server/server.csproj",
       "file": "${cwd}/server/server.csproj",
       "group": "build",
-      "label": "dotnet: build server.csproj",
+      "label": "dotnet: build server.csproj"
+    },
+    {
+      "type": "dotnet",
+      "task": "build ${cwd}/client-browser/client-browser.csproj",
+      "file": "${cwd}/client-browser/client-browser.csproj",
+      "group": "build",
+      "label": "dotnet: build client-browser.csproj"
     }
   ]
 }

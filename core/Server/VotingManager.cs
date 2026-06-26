@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using operation_vote.Shared;
+using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Server
 {
@@ -47,28 +48,13 @@ namespace operation_vote.Server
         Console.WriteLine($"OnUserRegistered: {user.Name}");
         user.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
       };
-      _server.OnClientAuthorized += (sender, e) =>
+      _server.OnClientUserChange += (sender, e) =>
       {
-        Console.WriteLine($"OnClientAuthorized: {e.User.Name}");
         using var _ = managerLock.EnterUpgradeableReadLockAsToken();
-        var (client, user) = e;
+        var (client, oldUser, newUser) = e;
         try
         {
-          int multiplierChange = user.VoteMultiplier - _server.UnauthorizedUser.VoteMultiplier;
-          if(multiplierChange != 0)
-            using(managerLock.EnterWriteLockAsToken())
-              ProcessVoteMultiplierChange(client, multiplierChange);
-        }
-        finally { }
-      };
-      _server.OnClientUnauthorized += (sender, e) =>
-      {
-        Console.WriteLine($"OnClientUnauthorized: {e.User.Name}");
-        using var _ = managerLock.EnterUpgradeableReadLockAsToken();
-        var (client, user) = e;
-        try
-        {
-          int multiplierChange = _server.UnauthorizedUser.VoteMultiplier - user.VoteMultiplier;
+          int multiplierChange = newUser.VoteMultiplier - oldUser.VoteMultiplier;
           if(multiplierChange != 0)
             using(managerLock.EnterWriteLockAsToken())
               ProcessVoteMultiplierChange(client, multiplierChange);
@@ -139,6 +125,7 @@ namespace operation_vote.Server
     /// </remarks>
     /// <param name="client">the client</param>
     /// <param name="oldUser">the original user the client was linked to</param>
+    [Obsolete("The use cases of this should be covered by the server events.")]
     public void SignalUnhandledUserChange(ClientInfo client, User oldUser)
     {
       using var _ = managerLock.EnterUpgradeableReadLockAsToken();

@@ -9,6 +9,7 @@
     <RootNamespace>operation_vote.Interface.ClientBrowser</RootNamespace>
     <BlazorCacheBootResources>false</BlazorCacheBootResources>
     <RuntimeIdentifiers>browser-wasm</RuntimeIdentifiers>
+    <RunAOTCompilation>false</RunAOTCompilation>
     <!-- <WasmEnableThreads>true</WasmEnableThreads> -->
   </PropertyGroup>
 
@@ -17,6 +18,7 @@
     <ProjectReference Include="..\shared\shared.csproj" SkipGetTargetFrameworkProperties="true" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.0" PrivateAssets="all" />
+    <!-- <Content Include="wwwroot\**\*" CopyToPublishDirectory="PreserveNewest" /> -->
   </ItemGroup>
 
 </Project>

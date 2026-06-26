@@ -52,8 +52,8 @@ namespace operation_vote.Client
 		public event EventHandler<(T, string)>? OnDisconnect;
 		public event EventHandler? OnConnectionFinished;
 		public event EventHandler<bool>? OnAuthorizationFinished;
-		private volatile int voteMultiplierCache = ProtocolInfo.ClientDefaultVoteMultiplier;
-		public int VoteMultiplier => voteMultiplierCache;
+		private int voteMultiplierCache = ProtocolInfo.ClientDefaultVoteMultiplier;
+		public int VoteMultiplier => Volatile.Read(ref voteMultiplierCache);
 		private volatile string? user = null;
 		public string? User => user;
 
@@ -192,7 +192,7 @@ namespace operation_vote.Client
 			using var writer = new BinaryWriter(ms, Encoding.UTF8);
 
 			writer.Write(false);
-			if(!operation.Serialize(writer)) return false;
+			if (!operation.Serialize(writer)) return false;
 
 			while (!Disconnected && !token.IsCancellationRequested)
 			{
@@ -205,6 +205,7 @@ namespace operation_vote.Client
 					await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);
 					break;
 				}
+				catch (TaskCanceledException) { return false; }
 				finally { if (locked) _connectionLock.Release(); }
 			}
 			return true;
@@ -394,22 +395,26 @@ namespace operation_vote.Client
 					break;
 				case ProtocolInfo.ServerCommands.UpdateStatusCommand:
 					string stat = reader.ReadString();
-					Console.WriteLine($"Update status: {stat}");
 					switch (stat)
 					{
 						case "MUL":
 							int multiplier = reader.Read7BitEncodedInt();
-							OnVoteMultiplierChange?.Invoke(this, (Interlocked.Exchange(ref voteMultiplierCache, multiplier), multiplier));
+							int oldMultiplier = Interlocked.Exchange(ref voteMultiplierCache, multiplier);
+							OnVoteMultiplierChange?.Invoke(this, (oldMultiplier, multiplier));
 							break;
 						case "ACO":
-							bool unauthorized = reader.ReadBoolean();
+							bool authorized = reader.ReadBoolean();
 							string? _user;
-							if (!unauthorized)
+							if (authorized)
 								_user = reader.ReadString();
 							else
 								_user = null;
 							user = _user;
 							OnUserChanged?.Invoke(this, user);
+							int newMultiplier = reader.Read7BitEncodedInt();
+							int _oldMultiplier = Interlocked.Exchange(ref voteMultiplierCache, newMultiplier);
+							if (_oldMultiplier != newMultiplier)
+								OnVoteMultiplierChange?.Invoke(this, (_oldMultiplier, newMultiplier));
 							break;
 					}
 					break;
@@ -436,7 +441,7 @@ namespace operation_vote.Client
 		{
 			GC.SuppressFinalize(this);
 			if (Interlocked.Exchange(ref _isDisposedState, 1) == 1) return;
-			_ = Dispose_();
+			Dispose_().GetAwaiter().GetResult();
 		}
 		private async Task Dispose_()
 		{

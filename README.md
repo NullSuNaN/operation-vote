@@ -9,8 +9,9 @@ You can make your own servers and clients with the `core/` stuff.
 The `client-window`, `client-browser`, `server` are all just an implementation to process generic voting.
 
 If the server port is not open for WLAN, you need to use `0.0.0.0` or your WLAN IP as the host.
+If it still isn't working, then it is probably caused by your system security system.
 
-For the detail of the server configuration
+For the detail of the server configuration, see [config.schema.json](server/config.schema.json).
 
 ## Authentication
 

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using operation_vote.Shared;
+using operation_vote.Shared.Extensions;
 using operation_vote.Server.Network;
 
 namespace operation_vote.Server
@@ -22,7 +23,13 @@ namespace operation_vote.Server
     public event EventHandler<ClientInfo>? OnClientHandshakeCompleted;
     public event EventHandler<ClientInfo>? OnClientJoined;
     public event EventHandler<(ClientInfo Client, User User)>? OnClientAuthorized;
+    [Obsolete("Useless.")]
     public event EventHandler<(ClientInfo Client, User User)>? OnClientUnauthorized;
+    /// <summary>
+    /// Fired when the user of a client is changed. <br/>
+    /// when firing with <see cref="OnClientAuthorized"/> or <see cref="OnClientUnauthorized"/>, this fires last.
+    /// </summary>
+    public event EventHandler<(ClientInfo Client, User OldUser, User NewUser)>? OnClientUserChange;
     public event EventHandler<(ClientInfo Client, string username)>? OnClientAuthorizeFailed;
     public event EventHandler<(ClientInfo Client, Operation ReceivedOperation)>? OnOperationReceived;
     public event EventHandler<(ClientInfo Client, Exception Error)>? OnServerErrorEncountered;
@@ -174,6 +181,7 @@ namespace operation_vote.Server
                   await SendDirectAsync(clientInfo, ms.ToArray());
                 }
               OnClientAuthorized?.Invoke(this, (clientInfo, user));
+              OnClientUserChange?.Invoke(this, (clientInfo, UnauthorizedUser, user));
             }
             else
             {
@@ -268,7 +276,31 @@ namespace operation_vote.Server
       }
       OnUserDeleted?.Invoke(this, (user, clients));
       foreach (var item in clients)
+      {
         OnClientUnauthorized?.Invoke(this, (item, user));
+        OnClientUserChange?.Invoke(this, (item, user, UnauthorizedUser));
+      }
+    }
+    public async Task<User> ExchangeUser(ClientInfo client, User user)
+    {
+      User result = client.ExchangeUser(user);
+      OnClientUserChange?.Invoke(this, (client, user, UnauthorizedUser));
+      {
+        using var ms = new MemoryStream();
+        using var writer = new BinaryWriter(ms, Encoding.UTF8);
+        writer.Write(ProtocolInfo.ServerCommands.UpdateStatusCommand);
+        writer.Write("ACO");
+        if(ReferenceEquals(user, UnauthorizedUser))
+          writer.Write(false);
+        else
+        {
+          writer.Write(true);
+          writer.Write(user.Name);
+        }
+        writer.Write7BitEncodedInt(user.VoteMultiplier);
+        await SendDirectAsync(client, ms.ToArray());
+      }
+      return result;
     }
     private async void HandleUserRegistered(object? _, User user)
     {

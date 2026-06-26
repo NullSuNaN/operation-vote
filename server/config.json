@@ -9,7 +9,7 @@
     {
       "Name": "jump",
       "Keys": ["w", "W", " ", "ArrowUp", "MouseLeft"],
-      "AfkLimit": "00:00:07",
+      "AfkLimit": "00:00:05",
       "VoteResults": [
         {
           "type": "PressKey",
@@ -21,6 +21,30 @@
           "id": "antiJump",
           "fd": 2,
           "requireSupportRate": -0.2
+        }
+      ]
+    },
+    {
+      "Name": "left",
+      "Keys": ["a", "A", "ArrowLeft"],
+      "AfkLimit": "00:00:14",
+      "VoteResults": [
+        {
+          "type": "PressKey",
+          "key": "a",
+          "requireSupportRate": 0.50
+        }
+      ]
+    },
+    {
+      "Name": "right",
+      "Keys": ["d", "D", "ArrowRight"],
+      "AfkLimit": "00:00:14",
+      "VoteResults": [
+        {
+          "type": "PressKey",
+          "key": "d",
+          "requireSupportRate": 0.50
         }
       ]
     }

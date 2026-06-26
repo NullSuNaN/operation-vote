@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using Avalonia.Input;
 
 namespace operation_vote.Interface.ClientWindow
@@ -23,7 +24,7 @@ namespace operation_vote.Interface.ClientWindow
         case Key.Back: return "Backspace";
         case Key.Delete: return "Delete";
 
-        // Directional Navigations
+        // Directional Navigation
         case Key.Up: return "ArrowUp";
         case Key.Down: return "ArrowDown";
         case Key.Left: return "ArrowLeft";
@@ -80,19 +81,18 @@ namespace operation_vote.Interface.ClientWindow
       return rawKeyName;
     }
 
-    public enum MouseButton
+    [UnsupportedOSPlatform("browser")]
+    public static string GetMouseButtonName(MouseButton button)
     {
-      MouseLeft,
-      MouseMiddle,
-      MouseRight,
-      Unknown
-    }
-    public static MouseButton GetMouseButtonName(PointerPointProperties properties)
-    {
-      if(properties.IsLeftButtonPressed) return MouseButton.MouseLeft;
-      if(properties.IsMiddleButtonPressed) return MouseButton.MouseMiddle;
-      if(properties.IsRightButtonPressed) return MouseButton.MouseRight;
-      return MouseButton.Unknown;
+      return button switch
+      {
+        MouseButton.Left => "MouseLeft",
+        MouseButton.Right => "MouseRight",
+        MouseButton.Middle => "MouseMiddle",
+        MouseButton.XButton1 => "MouseX1",
+        MouseButton.XButton2 => "MouseX2",
+        _ => "MouseUnknown"
+      };
     }
   }
 }

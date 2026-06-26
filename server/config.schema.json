@@ -58,7 +58,7 @@
           },
           "Keys": {
             "type": "array",
-            "description": "Array mapping target execution input strings captured from incoming clients.",
+            "description": "Array mapping target execution input strings captured from incoming clients, cannot duplicate even across profiles.",
             "items": {
               "type": "string"
             },

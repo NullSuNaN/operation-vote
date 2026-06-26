@@ -59,7 +59,6 @@ namespace operation_vote.Interface.Shared
         if(afk != null)
         {
           writer.Write("afk:");
-          Console.WriteLine($"Sent afk: {afk.Value}");
           writer.Write((double)afk.Value.TotalMilliseconds);
         }
       }
