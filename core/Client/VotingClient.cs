@@ -199,7 +199,7 @@ namespace operation_vote.Client
 				bool locked = false;
 				try
 				{
-					_connectionLock.Wait(token);
+					await _connectionLock.WaitAsync(token);
 					locked = true;
 					if (operation.Type.IsDisposed || token.IsCancellationRequested) return false;
 					await SocketRequestHandler.SendAsync(ms.ToArray(), token).ConfigureAwait(false);

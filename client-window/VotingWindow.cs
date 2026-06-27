@@ -3,7 +3,6 @@ using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
-using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using operation_vote.Client;
@@ -22,21 +21,19 @@ namespace operation_vote.Interface.ClientWindow
 		public readonly VotingClient<T> Client;
 		private readonly CancellationTokenSource DisconnectCts = new();
 		private readonly CancellationTokenSource PressToCloseCts = new();
-		private readonly ClientHelper.AfkProcessor<T> AfkProcessor;
+		private readonly ClientManager<T> ClientManager;
 		private bool _readyToForceClose = false;
 		private bool isBanned = false;
-		private readonly ClientHelper.OperationManager<T> OperationManager;
 		private readonly ConcurrentDictionary<Key, object?> _currentlyHeldKeys = [];
 
-		public VotingWindow(VotingClient<T> client, ClientHelper.OperationManager<T> operationManager, ClientHelper.AfkProcessor<T> afkProcessor)
+		public VotingWindow(VotingClient<T> client, ClientManager<T> clientManager)
 		{
 			Title = "Operation Voting Client";
 			Width = 400;
 			Height = 200;
 			WindowStartupLocation = WindowStartupLocation.CenterScreen;
 			Client = client;
-			OperationManager = operationManager;
-			AfkProcessor = afkProcessor;
+			ClientManager = clientManager;
 
 			Background = Brushes.DimGray;
 			TransparencyLevelHint = [WindowTransparencyLevel.None];
@@ -113,13 +110,13 @@ namespace operation_vote.Interface.ClientWindow
 
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
-				await operationManager.RunWithOpType(async data =>
+				await clientManager.RunWithOpType(async data =>
 				{
 					if (data != null && _pressedKeysState.TryAdd(key, e))
 					{
 						var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
 						Task<bool>? sendTask = null;
-						AfkProcessor.UpdateAfk(
+						ClientManager.LockClient(
 							token => sendTask = client.SendOperationAsync(supportOp, token),
 							data.Value.Type,
 							VoteType.Support);
@@ -128,7 +125,7 @@ namespace operation_vote.Interface.ClientWindow
 							await client.DisposeAsync();
 					}
 					else
-						AfkProcessor.UpdateAfk(null);
+						ClientManager.LockClient(null);
 				}, keyStr);
 			});
 
@@ -139,13 +136,13 @@ namespace operation_vote.Interface.ClientWindow
 				if (DisconnectCts.IsCancellationRequested) return;
 				string keyStr = KeyMappingExtensions.GetJsStyleKeyName(e);
 				var key = e.Key;
-				await operationManager.RunWithOpType(async data =>
+				await ClientManager.RunWithOpType(async data =>
 				{
 					if (data != null && _pressedKeysState.Remove(key))
 					{
 						var againstOp = new Operation(data.Value.Type, VoteType.Against, []);
 						Task<bool>? sendTask = null;
-						AfkProcessor.UpdateAfk(
+						ClientManager.LockClient(
 							token => sendTask = client.SendOperationAsync(againstOp, token),
 							data.Value.Type,
 							VoteType.Support);
@@ -158,7 +155,7 @@ namespace operation_vote.Interface.ClientWindow
 						catch (TaskCanceledException) {}
 					}
 					else
-						AfkProcessor.UpdateAfk(null);
+						ClientManager.LockClient(null);
 				}, keyStr);
 			});
 
@@ -166,13 +163,13 @@ namespace operation_vote.Interface.ClientWindow
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
 				var button = e.GetCurrentPoint(this).Properties.PointerUpdateKind.GetMouseButton();
-				await operationManager.RunWithOpType(async data =>
+				await ClientManager.RunWithOpType(async data =>
 				{
 					if (data != null && _pressedMouseButtonState.Add(button))
 					{
 						var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
 						Task<bool>? sendTask = null;
-						AfkProcessor.UpdateAfk(
+						ClientManager.LockClient(
 							token => sendTask = client.SendOperationAsync(supportOp, token),
 							data.Value.Type,
 							VoteType.Support);
@@ -181,7 +178,7 @@ namespace operation_vote.Interface.ClientWindow
 							await client.DisposeAsync();
 					}
 					else
-						AfkProcessor.UpdateAfk(null);
+						ClientManager.LockClient(null);
 				}, KeyMappingExtensions.GetMouseButtonName(button));
 			});
 
@@ -189,13 +186,13 @@ namespace operation_vote.Interface.ClientWindow
 			{
 				if (DisconnectCts.IsCancellationRequested) return;
 				var button = e.InitialPressMouseButton;
-				await operationManager.RunWithOpType(async data =>
+				await ClientManager.RunWithOpType(async data =>
 				{
 					if (data != null && _pressedMouseButtonState.Remove(button))
 					{
 						var againstOp = new Operation(data.Value.Type, VoteType.Against, []);
 						Task<bool>? sendTask = null;
-						AfkProcessor.UpdateAfk(
+						ClientManager.LockClient(
 							token => sendTask = client.SendOperationAsync(againstOp, token),
 							data.Value.Type,
 							VoteType.Support);
@@ -204,7 +201,7 @@ namespace operation_vote.Interface.ClientWindow
 							await client.DisposeAsync();
 					}
 					else
-						AfkProcessor.UpdateAfk(null);
+						ClientManager.LockClient(null);
 				}, KeyMappingExtensions.GetMouseButtonName(button));
 			});
 		}

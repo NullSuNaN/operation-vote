@@ -6,13 +6,14 @@ using System.Runtime.Versioning;
 namespace operation_vote.Server.Network
 {
   [UnsupportedOSPlatform("browser")]
-  public class WSServerChannel : IServerChannel
+  public class WSServerChannel : IConcurrentServerChannel
   {
     private readonly HttpListener _listener;
     private readonly CancellationTokenSource _cts = new();
-    private readonly ConcurrentDictionary<ClientInfo, WebSocket> _sockets = new();
+    
+    // Track WebSocket and its dedicated write lock wrapper
+    private readonly ConcurrentDictionary<ClientInfo, (WebSocket Socket, SemaphoreSlim WriteLock)> _sockets = new();
 
-    // Public CORS Rule Configurations
     public string AllowedOrigins { get; set; } = "*";
     public string AllowedMethods { get; set; } = "GET, POST, OPTIONS";
     public string AllowedHeaders { get; set; } = "Content-Type, Authorization";
@@ -22,11 +23,10 @@ namespace operation_vote.Server.Network
     public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataReceived;
     public event EventHandler<(ClientInfo Client, byte[] Payload)>? OnChannelDataSent;
 
-
     public WSServerChannel(string prefixUri)
     {
       _listener = new HttpListener();
-      _listener.Prefixes.Add(prefixUri); // Format: "http://127.0.0.1:9056/"
+      _listener.Prefixes.Add(prefixUri);
     }
 
     public async Task StartAsync(User unauthorizedUser)
@@ -37,21 +37,23 @@ namespace operation_vote.Server.Network
         while (!_cts.Token.IsCancellationRequested)
         {
           HttpListenerContext context = await _listener.GetContextAsync();
-
-          // Apply standard CORS policy headers to every incoming HTTP request frame
           ApplyCorsHeaders(context);
 
-          // Handle HTTP OPTIONS Preflight Request
           if (context.Request.HttpMethod.Equals("OPTIONS", StringComparison.OrdinalIgnoreCase))
           {
-            context.Response.StatusCode = 204; // No Content for successful preflight
+            context.Response.StatusCode = 204;
             context.Response.Close();
             continue;
           }
 
           if (context.Request.IsWebSocketRequest)
           {
-            _ = Task.Run(() => ProcessWebSocketHandshakeAsync(context, unauthorizedUser), _cts.Token);
+            // 🟢 Bug Fix: Handshake worker threads are now explicitly started
+            new Thread(() => ProcessWebSocketHandshakeAsync(context, unauthorizedUser).GetAwaiter().GetResult())
+            {
+              IsBackground = true,
+              Name = $"WS Handshake Work"
+            }.Start(); 
           }
           else
           {
@@ -65,11 +67,10 @@ namespace operation_vote.Server.Network
 
     private void ApplyCorsHeaders(HttpListenerContext context)
     {
-      // If checking a specific dynamic origin list, read context.Request.Headers["Origin"]
       context.Response.Headers.Add("Access-Control-Allow-Origin", AllowedOrigins);
       context.Response.Headers.Add("Access-Control-Allow-Methods", AllowedMethods);
       context.Response.Headers.Add("Access-Control-Allow-Headers", AllowedHeaders);
-      context.Response.Headers.Add("Access-Control-Max-Age", "86400"); // Cache preflight response for 24 hours
+      context.Response.Headers.Add("Access-Control-Max-Age", "86400");
     }
 
     private async Task ProcessWebSocketHandshakeAsync(HttpListenerContext context, User unauthorizedUser)
@@ -80,7 +81,8 @@ namespace operation_vote.Server.Network
         WebSocket webSocket = wsContext.WebSocket;
         Guid clientId = Guid.NewGuid();
         ClientInfo client = new(this, clientId, unauthorizedUser);
-        _sockets[client] = webSocket;
+        
+        _sockets[client] = (webSocket, new SemaphoreSlim(1, 1));
 
         OnChannelClientConnected?.Invoke(this, client);
         await HandleWebSocketLoopAsync(client, webSocket);
@@ -122,7 +124,10 @@ namespace operation_vote.Server.Network
       catch (Exception ex) { reason = ex.Message; }
       finally
       {
-        _sockets.TryRemove(client, out _);
+        if (_sockets.TryRemove(client, out var cell))
+        {
+          cell.WriteLock.Dispose();
+        }
         try { await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None); } catch { }
         webSocket.Dispose();
         OnChannelClientDisconnected?.Invoke(this, (client, reason));
@@ -131,34 +136,47 @@ namespace operation_vote.Server.Network
 
     public async Task SendToClientAsync(ClientInfo client, byte[] data)
     {
-      if (_sockets.TryGetValue(client, out var socket) && socket.State == WebSocketState.Open)
+      if (_sockets.TryGetValue(client, out var cell) && cell.Socket.State == WebSocketState.Open)
       {
-        await socket.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, _cts.Token);
-        OnChannelDataSent?.Invoke(this, (client, data));
+        // 🟢 Concurrency Fix: Prevents InvalidOperationException from concurrent outbound calls
+        await cell.WriteLock.WaitAsync();
+        try
+        {
+          if (cell.Socket.State != WebSocketState.Open) return;
+
+          await cell.Socket.SendAsync(new ArraySegment<byte>(data), WebSocketMessageType.Binary, true, _cts.Token);
+          OnChannelDataSent?.Invoke(this, (client, data));
+        }
+        finally
+        {
+          cell.WriteLock.Release();
+        }
       }
     }
 
     public async Task ResetAsync(ClientInfo Client)
     {
-      if (_sockets.TryGetValue(Client, out var socket) && socket.State == WebSocketState.Open)
+      if (_sockets.TryGetValue(Client, out var cell) && cell.Socket.State == WebSocketState.Open)
       {
-        socket.Abort();
+        cell.Socket.Abort();
       }
     }
 
     public async Task BroadcastAsync(byte[] data)
     {
-      foreach (var clientId in _sockets.Keys)
-      {
-        try { await SendToClientAsync(clientId, data); } catch { }
-      }
+      var tasks = _sockets.Keys.Select(client => SendToClientAsync(client, data));
+      await Task.WhenAll(tasks);
     }
 
     public void Stop()
     {
       _cts.Cancel();
       try { _listener.Stop(); } catch { }
-      foreach (var socket in _sockets.Values) socket.Dispose();
+      foreach (var cell in _sockets.Values)
+      {
+        cell.Socket.Dispose();
+        cell.WriteLock.Dispose();
+      }
       _sockets.Clear();
     }
 

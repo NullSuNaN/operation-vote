@@ -45,7 +45,6 @@ namespace operation_vote.Server
       _server.OnClientDisconnected += HandleClientDisconnected;
       _server.OnUserRegistered += (sender, user) =>
       {
-        Console.WriteLine($"OnUserRegistered: {user.Name}");
         user.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
       };
       _server.OnClientUserChange += (sender, e) =>
@@ -64,7 +63,6 @@ namespace operation_vote.Server
 
       _server.OnUserDeleted += (sender, e) =>
       {
-        Console.WriteLine($"OnUserDeleted: {e.User.Name}");
         managerLock.EnterUpgradeableReadLock();
         e.User.OnVoteMultiplierChange -= HandleUserVoteMultiplierChange;
       };
@@ -218,7 +216,6 @@ namespace operation_vote.Server
     private void HandleUserVoteMultiplierChange(object? sender, (int Original, int New) e)
     {
       User user = (User?)sender ?? null!;
-      Console.WriteLine($"OnUserVoteMultiplierChange: {user.Name}: {e.Original} -> {e.New}");
       // Step 1: Snapshot the client list under a READ lock only, with NO managerLock held.
       // This avoids the lock-order inversion deadlock with the disconnect handler
       // which acquires ConnectedClientsLock then managerLock.

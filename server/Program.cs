@@ -10,9 +10,9 @@ namespace operation_vote.Interface.Server
 {
   // Updated configurations structures matching the polymorphic results definitions array
   public record NetworkConfig(
-    [property: JsonPropertyName("TcpHost")] string TcpHost,
-    [property: JsonPropertyName("TcpPort")] int TcpPort,
-    [property: JsonPropertyName("WsUriPrefix")] string WsUriPrefix
+    [property: JsonPropertyName("TcpHost")] string? TcpHost,
+    [property: JsonPropertyName("TcpPort")] int? TcpPort,
+    [property: JsonPropertyName("WsUriPrefix")] string? WsUriPrefix
   );
 
   public record ProfileConfig(
@@ -124,9 +124,9 @@ namespace operation_vote.Interface.Server
       }
 
       // 1. TCP Driver Binds Directly
-      var tcpDriver = string.IsNullOrEmpty(config.Network.TcpHost)
+      var tcpDriver = (string.IsNullOrEmpty(config.Network.TcpHost) || config.Network.TcpPort is null)
           ? null
-          : new TcpServerChannel(config.Network.TcpHost, config.Network.TcpPort);
+          : new TcpServerChannel(config.Network.TcpHost, config.Network.TcpPort!.Value);
 
       // 2. Sanitize and Validate the WebSocket Prefix URI Layout
       var sanitizedWsPrefix = config.Network.WsUriPrefix;
@@ -158,8 +158,8 @@ namespace operation_vote.Interface.Server
           : new WSServerChannel(sanitizedWsPrefix);
 
       var transportCluster = new List<IConcurrentServerChannel>();
-      if (tcpDriver != null) transportCluster.Add(new ConcurrentChannelWrapper<TcpServerChannel>(tcpDriver));
-      if (wsDriver != null) transportCluster.Add(new ConcurrentChannelWrapper<WSServerChannel>(wsDriver));
+      if (tcpDriver != null) transportCluster.Add(tcpDriver);
+      if (wsDriver != null) transportCluster.Add(wsDriver);
       if(LogNetworkTrace)
         foreach (var cluster in transportCluster)
         {
@@ -259,7 +259,7 @@ namespace operation_vote.Interface.Server
             Console.WriteLine("manager        - open user manager");
             break;
           default:
-            Console.WriteLine($"Invalid command: {string.Concat(command)}, you can use `help` to get help.");
+            Console.WriteLine($"Invalid command: {command.FirstOrDefault()}, you can use `help` to get help.");
             break;
         }
       }
@@ -281,10 +281,15 @@ namespace operation_vote.Interface.Server
       return str?.Trim()?.ToLower() switch
       {
         "trace" => LogLevel.Trace,
+        "trce" => LogLevel.Trace,
         "debug" => LogLevel.Debug,
+        "debg" => LogLevel.Debug,
         "information" => LogLevel.Information,
+        "info" => LogLevel.Information,
         "warning" => LogLevel.Warning,
+        "warn" => LogLevel.Warning,
         "error" => LogLevel.Error,
+        "err" => LogLevel.Error,
         _ => null,
       };
     }

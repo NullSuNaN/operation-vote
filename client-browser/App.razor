@@ -1,5 +1,4 @@
 @using System.Collections.Concurrent
-@using System.Threading
 @using Microsoft.AspNetCore.Components.Web
 @using Microsoft.JSInterop
 @using SocketRequestHandler = Client.Request.SocketRequestHandlerWS
@@ -8,6 +7,7 @@
 @using operation_vote.Shared
 
 @implements IDisposable
+@implements IAsyncDisposable
 @inject NavigationManager navigationManager
 @inject IJSRuntime JsRuntime
 
@@ -149,8 +149,7 @@ else
       ServerUri = value.Substring(expectedAtMarkerIndex + 1);
     }
   }
-  private ClientHelper.AfkProcessor<SocketRequestHandler>? afkProcessor;
-  private ClientHelper.OperationManager<SocketRequestHandler>? operationManager;
+  private ClientManager<SocketRequestHandler>? clientManager;
 
   private async Task ConnectToServerAsync()
   {
@@ -174,11 +173,7 @@ else
       {
         authenticationData = UseAnonymous ? null : new(Username, Password)
       };
-      afkProcessor = ClientHelper.AfkProcessor<SocketRequestHandler>.LaunchAfkProcessor(_client);
-      operationManager = ClientHelper.OperationManager<SocketRequestHandler>.CreateManager(_client, out var parsedTimeouts);
-      operationManager.OnOperationsReloaded += (sender, e) => {
-        afkProcessor.SetTimeouts(parsedTimeouts);
-      };
+      clientManager = ClientManager<SocketRequestHandler>.LaunchClientManager(_client, useThreads: false);
 
       _client.OnDisconnect += HandleClientDisconnect;
       TaskCompletionSource<string?> authCs = new();
@@ -221,15 +216,6 @@ else
         checkIntervals++;
       }
 
-      try
-      {
-        afkProcessor?.SetTimeouts(parsedTimeouts);
-      }
-      catch (Exception parseEx)
-      {
-        Console.WriteLine($"[Bypass Warning] Operational data profile mapping skipped: {parseEx.Message}");
-      }
-
       CurrentStep = 4;
       StateHasChanged();
 
@@ -270,7 +256,7 @@ actualFailureDetail.Contains("ObjectDisposed"))
       StateHasChanged();
 
       await Task.Delay(200);
-      DisconnectAndReset();
+      await DisconnectAndReset();
     }
     finally
     {
@@ -282,47 +268,35 @@ actualFailureDetail.Contains("ObjectDisposed"))
 
   private void HandleClientDisconnect(object? sender, (SocketRequestHandler Handler, string Reason) data)
   {
-    afkProcessor?.SetTimeouts(null);
-
-    InvokeAsync(() =>
+    InvokeAsync(async () =>
     {
-      _errorMessage = $"Server disconnected connection: {data.Reason}";
-      DisconnectAndReset();
+      _errorMessage = $"Server disconnected: {data.Reason}";
+      await DisconnectAndReset();
       StateHasChanged();
     });
   }
 
-  private void ManualDisconnect()
+  private async Task ManualDisconnect()
   {
     _errorMessage = "Session manually terminated by user.";
-    DisconnectAndReset();
+    await DisconnectAndReset();
   }
 
-  private void DisconnectAndReset()
+  private async Task DisconnectAndReset()
   {
     _isOperational = false;
     _pressedInputState.Clear();
     
+    _client?.OnDisconnect -= HandleClientDisconnect;
+    
+    try { Interlocked.Exchange(ref _cts, null)?.Cancel(); } catch { /* no-op */ }
+    try { await (Interlocked.Exchange(ref clientManager, null)?.DisposeAsync() ?? ValueTask.CompletedTask); } catch { /* no-op */ }
+    try { await (Interlocked.Exchange(ref _client, null)?.DisposeAsync() ?? Task.CompletedTask); } catch { /* no-op */ }
+    try { Interlocked.Exchange(ref _wsHandler, null)?.Dispose(); } catch { /* no-op */ }
+    try { await (Interlocked.Exchange(ref clientManager, null)?.DisposeAsync() ?? ValueTask.CompletedTask); } catch { /* no-op */ }
 
-    if (_client != null)
-    {
-      _client.OnDisconnect -= HandleClientDisconnect;
-    }
-
-    try { _cts?.Cancel(); } catch { /* no-op */ }
-
-    var clientToDispose = _client;
-    var handlerToDispose = _wsHandler;
-    var ctsToDispose = _cts;
-
-    _client = null;
-    _wsHandler = null;
-    _cts = null;
-
-    try { clientToDispose?.Dispose(); } catch { /* no-op */ }
-    try { handlerToDispose?.Dispose(); } catch { /* no-op */ }
-    try { ctsToDispose?.Dispose(); } catch { /* no-op */ }
-
+    Volatile.Write(ref _isOperational, false);
+    StateHasChanged();
   }
 
   private async Task HandleConnectKeyPairSubmit(KeyboardEventArgs e)
@@ -365,15 +339,13 @@ actualFailureDetail.Contains("ObjectDisposed"))
   private async Task ProcessInputDownAsync(string inputKey)
   {
     if (_client == null || !_isOperational) return;
-    await operationManager?.RunWithOpType(async data =>
+    await clientManager?.RunWithOpType(async data =>
     {
       if (data != null && _pressedInputState.TryAdd(inputKey, 0))
       {
         using var supportOp = new Operation(data.Value.Type, VoteType.Support, []);
-        if(afkProcessor != null)
-          await afkProcessor.UpdateAfkAsync(async token => {
-            await _client.SendOperationAsync(supportOp, token);
-          });
+        if(clientManager != null)
+          await clientManager.LockClientAsync(token => _client.SendOperationAsync(supportOp, token));
 
         StatusTitle = "Action Active";
         StatusMessage = $"Holding: '{inputKey}'";
@@ -385,13 +357,13 @@ actualFailureDetail.Contains("ObjectDisposed"))
   private async Task ProcessInputUpAsync(string inputKey)
   {
     if (_client == null || !_isOperational) return;
-    await operationManager?.RunWithOpType(async data =>
+    await clientManager?.RunWithOpType(async data =>
     {
       if (data != null && _pressedInputState.TryRemove(inputKey, out _))
       {
         using var releaseOp = new Operation(data.Value.Type, VoteType.Against, Array.Empty<byte>());
-        if(afkProcessor != null)
-          await afkProcessor.UpdateAfkAsync(async token => {
+        if(clientManager != null)
+          await clientManager.LockClientAsync(async token => {
             await _client.SendOperationAsync(releaseOp, token);
           });
 
@@ -414,7 +386,11 @@ actualFailureDetail.Contains("ObjectDisposed"))
 
   public void Dispose()
   {
-    DisconnectAndReset();
+    DisconnectAndReset().GetAwaiter().GetResult();
+  }
+  public async ValueTask DisposeAsync()
+  {
+    await DisconnectAndReset();
   }
 
   public async Task EventWrapper(Task result)
@@ -428,7 +404,7 @@ actualFailureDetail.Contains("ObjectDisposed"))
       _errorMessage = e.Message;
       try
       {
-        _client?.Dispose();
+        await (_client?.DisposeAsync() ?? Task.CompletedTask);
       }
       finally { }
       ;

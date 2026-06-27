@@ -2,8 +2,8 @@
   "$schema": "config.schema.json",
   "Network": {
     "TcpHost": "0.0.0.0",
-    "TcpPort": 9055,
-    "WsUriPrefix": "http://+:9056/"
+    "TcpPort": 11167,
+    "WsUriPrefix": "http://+:11169/"
   },
   "Profiles": [
     {

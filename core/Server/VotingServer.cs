@@ -190,7 +190,7 @@ namespace operation_vote.Server
             break;
           case ProtocolInfo.ClientCommands.AuthenticateResultCommand: // client sends authentication result
             int length = reader.Read7BitEncodedInt();
-            clientInfo.UserAuthenticationResult.SetResult(reader.ReadBytes(length));
+            clientInfo.UserAuthenticationResult.TrySetResult(reader.ReadBytes(length));
             break;
         }
       }
@@ -223,7 +223,7 @@ namespace operation_vote.Server
     }
 
     private void HandleUserVoteMultiplierChange(object? sender, (int Original, int New) e)
-      => _ = SendMultiplierUpdateAsync((User?)sender ?? null!);
+      => _ = SendMultiplierUpdateAsync((User?)sender!);
     private async Task SendMultiplierUpdateAsync(User user)
     {
       Console.WriteLine($"The multiplier of user {user.Name} is set to {user.VoteMultiplier}.");

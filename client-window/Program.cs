@@ -5,7 +5,6 @@ using Avalonia.Controls.ApplicationLifetimes;
 using operation_vote.Client;
 using operation_vote.Client.Request;
 using operation_vote.Interface.Shared;
-using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Interface.ClientWindow
 {
@@ -52,8 +51,7 @@ namespace operation_vote.Interface.ClientWindow
     // Thread-safe state tracking for the modern AFK logic
     private readonly ConcurrentDictionary<string, Operation.OperationType> _keyOpMapping = new();
 
-    private ClientHelper.AfkProcessor<T> AfkProcessor = null!;
-		private ClientHelper.OperationManager<T> operationManager = null!;
+    private ClientManager<T> ClientManager = null!;
 
 
     [STAThread]
@@ -104,7 +102,7 @@ namespace operation_vote.Interface.ClientWindow
       Console.WriteLine("=== RUNTIME DOMAIN EXITED ===");
     }
 
-    private void CleanupBackgroundTasks() => AfkProcessor?.Dispose();
+    private void CleanupBackgroundTasks() => ClientManager?.Dispose();
 
     private async Task InitializeAndShowUIAsync(string uri, AuthenticationClient.AuthenticationData? authenticationData, IClassicDesktopStyleApplicationLifetime desktop)
     {
@@ -117,11 +115,7 @@ namespace operation_vote.Interface.ClientWindow
         {
           authenticationData=authenticationData
         };
-        AfkProcessor = ClientHelper.AfkProcessor<T>.LaunchAfkProcessor(_client);
-        operationManager = ClientHelper.OperationManager<T>.CreateManager(_client, out var parsedTimeouts);
-        operationManager.OnOperationsReloaded += (sender, e) => {
-          AfkProcessor.SetTimeouts(e.ParsedTimeout);
-        };
+        ClientManager = ClientManager<T>.LaunchClientManager(_client);
 
         Console.WriteLine($"Connecting to network node at {uri}...");
         _client.OnAuthorizationFinished += (sender, success) =>
@@ -146,7 +140,7 @@ namespace operation_vote.Interface.ClientWindow
         await _client.ConnectAsync();
         Console.WriteLine("Handshake completed. Server connection initialized successfully.");
 
-        var window = new VotingWindow<T>(_client, operationManager, AfkProcessor);
+        var window = new VotingWindow<T>(_client, ClientManager);
         desktop.MainWindow = window; 
         
         // Explicitly show the window inside the lifecycle loop

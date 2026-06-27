@@ -6,11 +6,13 @@ using System.Runtime.Versioning;
 namespace operation_vote.Server.Network
 {
   [UnsupportedOSPlatform("browser")]
-  public class TcpServerChannel(string ipAddress, int port) : IServerChannel
+  public class TcpServerChannel(string ipAddress, int port) : IConcurrentServerChannel
   {
     private readonly TcpListener _listener = new(IPAddress.Parse(ipAddress), port);
     private readonly CancellationTokenSource _cts = new();
-    private readonly ConcurrentDictionary<ClientInfo, TcpClient> _clients = new();
+    
+    // Track both the TcpClient and a SemaphoreSlim to lock outbound writes for that specific client
+    private readonly ConcurrentDictionary<ClientInfo, (TcpClient Client, SemaphoreSlim WriteLock)> _clients = new();
 
     public event EventHandler<ClientInfo>? OnChannelClientConnected;
     public event EventHandler<(ClientInfo Client, string Reason)>? OnChannelClientDisconnected;
@@ -27,10 +29,16 @@ namespace operation_vote.Server.Network
           TcpClient client = await _listener.AcceptTcpClientAsync(_cts.Token);
           Guid clientId = Guid.NewGuid();
           ClientInfo clientInfo = new(this, clientId, unauthorizedUser);
-          _clients[clientInfo] = client;
+          
+          // Initialize a write lock exclusively for this client session
+          _clients[clientInfo] = (client, new SemaphoreSlim(1, 1));
 
           OnChannelClientConnected?.Invoke(this, clientInfo);
-          _ = Task.Run(() => HandleClientLoopAsync(clientInfo, client), _cts.Token);
+          new Thread(() => HandleClientLoopAsync(clientInfo, client).GetAwaiter().GetResult())
+          {
+            Name = $"Client {clientInfo.ClientId,6}",
+            IsBackground = true
+          }.Start();
         }
       }
       catch (OperationCanceledException) { }
@@ -40,7 +48,7 @@ namespace operation_vote.Server.Network
     {
       using var stream = client.GetStream();
       byte[] lengthBuffer = new byte[4];
-      string reason = "Connection closed cleanly.";
+      string reason = "Connection closed.";
 
       try
       {
@@ -52,7 +60,6 @@ namespace operation_vote.Server.Network
             break;
           }
 
-          // FIX: Convert from Big-Endian network byte order to native system architecture
           if (BitConverter.IsLittleEndian)
           {
             Array.Reverse(lengthBuffer);
@@ -81,7 +88,10 @@ namespace operation_vote.Server.Network
       }
       finally
       {
-        _clients.TryRemove(clientInfo, out _);
+        if (_clients.TryRemove(clientInfo, out var cell))
+        {
+          cell.WriteLock.Dispose();
+        }
         client.Close();
         OnChannelClientDisconnected?.Invoke(this, (clientInfo, reason));
       }
@@ -89,41 +99,49 @@ namespace operation_vote.Server.Network
 
     public async Task SendToClientAsync(ClientInfo client, byte[] data)
     {
-      if (_clients.TryGetValue(client, out var tcpClient) && tcpClient.Connected)
+      if (_clients.TryGetValue(client, out var cell) && cell.Client.Connected)
       {
-        var stream = tcpClient.GetStream();
-        byte[] lengthHeader = BitConverter.GetBytes(data.Length);
-
-        // FIX: Convert from native system architecture to Big-Endian network byte order
-        if (BitConverter.IsLittleEndian)
+        // 🟢 Concurrency Fix: Await the write lock to prevent interleaving streams
+        await cell.WriteLock.WaitAsync();
+        try
         {
-          Array.Reverse(lengthHeader);
-        }
+          // Double check connection status inside the lock
+          if (!cell.Client.Connected) return;
 
-        await stream.WriteAsync(lengthHeader, 0, 4);
-        await stream.WriteAsync(data, 0, data.Length);
-        OnChannelDataSent?.Invoke(this, (client, data));
+          var stream = cell.Client.GetStream();
+          byte[] lengthHeader = BitConverter.GetBytes(data.Length);
+
+          if (BitConverter.IsLittleEndian)
+          {
+            Array.Reverse(lengthHeader);
+          }
+
+          await stream.WriteAsync(lengthHeader, 0, 4);
+          await stream.WriteAsync(data, 0, data.Length);
+          await stream.FlushAsync(); // Flush immediately to force packet delivery
+          
+          OnChannelDataSent?.Invoke(this, (client, data));
+        }
+        finally
+        {
+          cell.WriteLock.Release();
+        }
       }
     }
+
     public async Task ResetAsync(ClientInfo Client)
     {
-      if (_clients.TryGetValue(Client, out var tcpClient) && tcpClient.Connected)
+      if (_clients.TryGetValue(Client, out var cell) && cell.Client.Connected)
       {
-        tcpClient.Close();
+        cell.Client.Close();
       }
     }
 
     public async Task BroadcastAsync(byte[] data)
     {
-      foreach (var clientId in _clients.Keys)
-      {
-        try
-        {
-          // SendToClientAsync handles its own Big-Endian length framing internally
-          await SendToClientAsync(clientId, data);
-        }
-        catch { }
-      }
+      // Parallelize out-bound tasks concurrently across all active client write pipelines
+      var tasks = _clients.Keys.Select(client => SendToClientAsync(client, data));
+      await Task.WhenAll(tasks);
     }
 
     private static async Task<bool> TryReadExactlyAsync(NetworkStream stream, byte[] buffer, int length)
@@ -142,7 +160,11 @@ namespace operation_vote.Server.Network
     {
       _cts.Cancel();
       _listener.Stop();
-      foreach (var client in _clients.Values) client.Close();
+      foreach (var cell in _clients.Values)
+      {
+        cell.Client.Close();
+        cell.WriteLock.Dispose();
+      }
       _clients.Clear();
     }
 
