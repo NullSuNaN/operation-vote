@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+using Microsoft.JSInterop;
 
 namespace operation_vote.Interface.ClientBrowser
 {
@@ -13,7 +14,18 @@ namespace operation_vote.Interface.ClientBrowser
 
       builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });
 
-      await builder.Build().RunAsync();
+      var host = builder.Build();
+      try
+      {
+        await host.RunAsync();
+      }
+      catch (Exception ex)
+      {
+        var jsRuntime = host.Services.GetRequiredService<IJSRuntime>();
+        await jsRuntime.InvokeVoidAsync("alert", $"Startup Crash: {ex.Message}\n\nDetails: {ex.StackTrace}");
+
+        throw;
+      }
     }
   }
 }

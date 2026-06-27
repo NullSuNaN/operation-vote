@@ -1,4 +1,6 @@
+@using System.Buffers.Text
 @using System.Collections.Concurrent
+@using System.Text
 @using Microsoft.AspNetCore.Components.Web
 @using Microsoft.JSInterop
 @using SocketRequestHandler = Client.Request.SocketRequestHandlerWS
@@ -19,7 +21,7 @@
       <p>Specify the target infrastructure address below:</p>
 
       <div class="form-group">
-        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:9056/"
+        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:11169/"
                @onkeypress="HandleConnectKeyPairSubmit" @oninput="UpdateInputField" disabled="@_isConnecting" />
         @if (navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
@@ -48,12 +50,16 @@
         </div>
       </div>
 
-      @if (!string.IsNullOrEmpty(_errorMessage))
-      {
-        <div class="error-banner">
-          @_errorMessage
-        </div>
-      }
+      <div class="error-banner">
+        <ErrorBoundary>
+          <ErrorContent>
+            @context.Message
+          </ErrorContent>
+          <ChildContent>
+            @_errorMessage
+          </ChildContent>
+        </ErrorBoundary>
+      </div>
 
       @if (_isConnecting)
       {
@@ -82,7 +88,7 @@
       }
       else
       {
-        <button class="connect-btn" type="submit" @onclick="ConnectToServerAsync" @onsubmit:preventDefault="true">
+        <button class="connect-btn" type="button" @onclick="ConnectToServerAsync">
           <span>Establish Link</span>
         </button>
       }
@@ -120,8 +126,15 @@ else
   private string _errorMessage = "";
   private int CurrentStep { get; set; } = 0;
 
-  private string ServerUri { get; set; } = "ws://192.168.1.2:9056/";
-  private string Username { get; set; } = "";
+  [Parameter]
+  [SupplyParameterFromQuery(Name = "server")]
+  public string ServerUri { get; set; } = "ws://127.0.0.1:11169/";
+  [Parameter]
+  [SupplyParameterFromQuery(Name = "user")]
+  public string Username { get; set; } = "";
+  [Parameter]
+  [SupplyParameterFromQuery(Name = "password")]
+  public string? PasswordB64Param { get; set; } = null;
   private string Password { get; set; } = "";
   private ElementReference UsernameField;
   private ElementReference PasswordField;
@@ -153,115 +166,123 @@ else
 
   private async Task ConnectToServerAsync()
   {
-    if (string.IsNullOrWhiteSpace(ServerUri))
-    {
-      _errorMessage = "Target URI address field cannot be empty.";
-      return;
-    }
-
-    _isConnecting = true;
-    _errorMessage = "";
-    CurrentStep = 1;
-    StateHasChanged();
-
-    string? actualFailureDetail = null;
     try
     {
-      _cts = new CancellationTokenSource();
-      _wsHandler = new SocketRequestHandler();
-      _client = new VotingClient<SocketRequestHandler>(_wsHandler, ServerUri, _cts.Token)
+      if (string.IsNullOrWhiteSpace(ServerUri))
       {
-        authenticationData = UseAnonymous ? null : new(Username, Password)
-      };
-      clientManager = ClientManager<SocketRequestHandler>.LaunchClientManager(_client, useThreads: false);
-
-      _client.OnDisconnect += HandleClientDisconnect;
-      TaskCompletionSource<string?> authCs = new();
-
-      _client.OnAuthorizationFinished += (object? sender, bool success) =>
-      {
-        if (!success)
-        {
-          var client = (VotingClient<SocketRequestHandler>?)sender;
-          var username = client?.authenticationData?.Username;
-          var message = username == null ? "Failed to authorize to the operation server." : $"Failed to authorize to the operation server as {username}.";
-          authCs.SetResult(message);
-        }
-        else
-        {
-          authCs.SetResult(null);
-        }
-      }; // strict login requirement
-
-      CurrentStep = 2;
-      StateHasChanged();
-
-      await _client.ConnectAsync();
-      authCs.TrySetResult(null);
-      var authRes = await authCs.Task;
-      if (authRes != null)
-      {
-        _client?.Dispose();
-        actualFailureDetail = authRes;
-        throw new Exception();
+        _errorMessage = "Target URI address field cannot be empty.";
+        return;
       }
 
-      CurrentStep = 3;
+      _isConnecting = true;
+      _errorMessage = "";
+      CurrentStep = 1;
       StateHasChanged();
 
-      int checkIntervals = 0;
-      while ((_client.OperationTypes == null || _client.OperationTypes.Count == 0) && checkIntervals < 60)
+      string? actualFailureDetail = null;
+      try
       {
-        await Task.Delay(50, _cts.Token);
-        checkIntervals++;
+        _cts = new CancellationTokenSource();
+        _wsHandler = new SocketRequestHandler();
+        _client = new VotingClient<SocketRequestHandler>(_wsHandler, ServerUri, _cts.Token)
+        {
+          authenticationData = UseAnonymous ? null : new(Username, Password)
+        };
+        clientManager = ClientManager<SocketRequestHandler>.LaunchClientManager(_client, useThreads: false);
+
+        _client.OnDisconnect += HandleClientDisconnect;
+        TaskCompletionSource<string?> authCs = new();
+
+        _client.OnAuthorizationFinished += (object? sender, bool success) =>
+        {
+          if (!success)
+          {
+            var client = (VotingClient<SocketRequestHandler>?)sender;
+            var username = client?.authenticationData?.Username;
+            var message = username == null ? "Failed to authorize to the operation server." : $"Failed to authorize to the operation server as {username}.";
+            authCs.SetResult(message);
+          }
+          else
+          {
+            authCs.SetResult(null);
+          }
+        }; // strict login requirement
+
+        CurrentStep = 2;
+        StateHasChanged();
+
+        await _client.ConnectAsync();
+        authCs.TrySetResult(null);
+        var authRes = await authCs.Task;
+        if (authRes != null)
+        {
+          _client?.Dispose();
+          actualFailureDetail = authRes;
+          throw new Exception();
+        }
+
+        CurrentStep = 3;
+        StateHasChanged();
+
+        int checkIntervals = 0;
+        while ((_client.OperationTypes == null || _client.OperationTypes.Count == 0) && checkIntervals < 60)
+        {
+          await Task.Delay(50, _cts.Token);
+          checkIntervals++;
+        }
+
+        CurrentStep = 4;
+        StateHasChanged();
+
+        StatusTitle = "System Operational";
+        StatusMessage = "Operational";
+        StatusClass = "ready";
+        _isOperational = true;
+        StateHasChanged();
+
+        _ = Task.Delay(100).ContinueWith(async _ =>
+        {
+          try { await containerRef.FocusAsync(); } catch { /* no-op */ }
+        });
       }
-
-      CurrentStep = 4;
-      StateHasChanged();
-
-      StatusTitle = "System Operational";
-      StatusMessage = "Operational";
-      StatusClass = "ready";
-      _isOperational = true;
-      StateHasChanged();
-
-      _ = Task.Delay(100).ContinueWith(async _ =>
+      catch (Exception ex)
       {
-        try { await containerRef.FocusAsync(); } catch { /* no-op */ }
-      });
+        actualFailureDetail ??= ex.Message;
+        if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") ||
+          actualFailureDetail.Contains("ObjectDisposed"))
+        {
+          if (ex.InnerException != null)
+          {
+            actualFailureDetail = ex.InnerException.Message;
+          }
+          else if (_wsHandler != null && !_wsHandler.IsConnected)
+          {
+            actualFailureDetail = "Remote server rejected or dropped connection immediately following successful handshake.";
+          }
+          else
+          {
+            actualFailureDetail = "Handshake synchronization timeout. No operational parameters received from host node.";
+          }
+        }
+
+        _errorMessage = $"Handshake failure: {actualFailureDetail}";
+        _isConnecting = false;
+        CurrentStep = 0;
+        StateHasChanged();
+
+        await Task.Delay(200);
+        await DisconnectAndReset();
+      }
+      finally
+      {
+        _isConnecting = false;
+        CurrentStep = 0;
+        StateHasChanged();
+      }
     }
-    catch (Exception ex)
+    catch(Exception ex)
     {
-      actualFailureDetail ??= ex.Message;
-      if (ex is ObjectDisposedException || actualFailureDetail.Contains("SemaphoreSlim") ||
-actualFailureDetail.Contains("ObjectDisposed"))
-      {
-        if (ex.InnerException != null)
-        {
-          actualFailureDetail = ex.InnerException.Message;
-        }
-        else if (_wsHandler != null && !_wsHandler.IsConnected)
-        {
-          actualFailureDetail = "Remote server rejected or dropped connection immediately following successful handshake.";
-        }
-        else
-        {
-          actualFailureDetail = "Handshake synchronization timeout. No operational parameters received from host node.";
-        }
-      }
-
-      _errorMessage = $"Handshake failure: {actualFailureDetail}";
-      _isConnecting = false;
-      CurrentStep = 0;
-      StateHasChanged();
-
-      await Task.Delay(200);
-      await DisconnectAndReset();
-    }
-    finally
-    {
-      _isConnecting = false;
-      CurrentStep = 0;
+      _errorMessage = ex.Message;
       StateHasChanged();
     }
   }
@@ -382,7 +403,15 @@ actualFailureDetail.Contains("ObjectDisposed"))
     _ => null
   };
 
-  protected override void OnInitialized() { }
+  protected override void OnInitialized() {
+    if(!string.IsNullOrEmpty(PasswordB64Param))
+      try {
+        Password = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(PasswordB64Param));
+      }
+      catch{ Password = "Password Parameter Should be Base64"; }
+    if(!string.IsNullOrEmpty(Username))
+      UseAnonymous = false;
+  }
 
   public void Dispose()
   {
