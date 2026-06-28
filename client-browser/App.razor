@@ -42,6 +42,7 @@
                     disabled="@_isConnecting" />
             <label for="hide-password">Hide</label>
           </div>
+          <button type="submit">(Reload & Save in Browser)</button>
         </div>
         <div class="form-item">
           <input type="checkbox" @bind="@UseAnonymous" class="checkbox-field" id="use-anonymous"
@@ -408,7 +409,11 @@ else
       try {
         Password = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(PasswordB64Param));
       }
-      catch{ Password = "Password Parameter Should be Base64"; }
+      catch
+      {
+        Password = "Password Parameter Should be Base64";
+        HidePassword = false;
+      }
     if(!string.IsNullOrEmpty(Username))
       UseAnonymous = false;
   }
