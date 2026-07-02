@@ -54,8 +54,8 @@ server --manager gd.json # opens the user manager with gd.json
 server --help # show help
 dotnet serve -d:dist/wwwroot -p8080 -a 0.0.0.0 # serve the browser client, require dotnet-serve tool
 client-window localhost:11167 # connect to localhost:9055 with raw TCP
-client-window localhost:11169 ws # connect to localhost:9055 with WS
-client-window localhost:11169 wss NullSuNaN RubRubPower123 # connect to localhost:9055 with WS and attempt to login as NullSuNaN
+client-window localhost:11169 wss # connect to localhost:9055 with WSS
+client-window localhost:11169 ws NullSuNaN RubRubPower123 # connect to localhost:9055 with WS and attempt to login as NullSuNaN
                                                            # or continue as Anonymous if the login failed
 ```
 + Server Configuration

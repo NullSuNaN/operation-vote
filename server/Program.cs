@@ -67,7 +67,7 @@ namespace operation_vote.Interface.Server
         }
       }
       else configFile = first ?? configFile;
-      string configPath = Path.Combine(Environment.CurrentDirectory, configFile);
+      string configPath = configFile;
 
       if (!File.Exists(configPath))
       {

@@ -177,7 +177,7 @@ else
 
       _isConnecting = true;
       _errorMessage = "";
-      CurrentStep = 1;
+      CurrentStep = 0;
       StateHasChanged();
 
       string? actualFailureDetail = null;
@@ -209,9 +209,9 @@ else
           }
         }; // strict login requirement
 
-        CurrentStep = 2;
         StateHasChanged();
 
+        CurrentStep = 1;
         await _client.ConnectAsync();
         authCs.TrySetResult(null);
         var authRes = await authCs.Task;
@@ -222,7 +222,7 @@ else
           throw new Exception();
         }
 
-        CurrentStep = 3;
+        CurrentStep = 2;
         StateHasChanged();
 
         int checkIntervals = 0;
@@ -232,7 +232,7 @@ else
           checkIntervals++;
         }
 
-        CurrentStep = 4;
+        CurrentStep = 3;
         StateHasChanged();
 
         StatusTitle = "System Operational";
@@ -245,6 +245,8 @@ else
         {
           try { await containerRef.FocusAsync(); } catch { /* no-op */ }
         });
+
+        CurrentStep = 4;
       }
       catch (Exception ex)
       {

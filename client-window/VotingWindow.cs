@@ -121,8 +121,7 @@ namespace operation_vote.Interface.ClientWindow
 							data.Value.Type,
 							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask!)
-							await client.DisposeAsync();
+						await sendTask!;
 					}
 					else
 						ClientManager.LockClient(null);
@@ -174,8 +173,7 @@ namespace operation_vote.Interface.ClientWindow
 							data.Value.Type,
 							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask!)
-							await client.DisposeAsync();
+						await sendTask!;
 					}
 					else
 						ClientManager.LockClient(null);
@@ -197,8 +195,7 @@ namespace operation_vote.Interface.ClientWindow
 							data.Value.Type,
 							VoteType.Support);
 						Avalonia.Threading.Dispatcher.UIThread.Post(() => _statusLabel.Text = GetStatusLabel());
-						if (!await sendTask!)
-							await client.DisposeAsync();
+						await sendTask!;
 					}
 					else
 						ClientManager.LockClient(null);

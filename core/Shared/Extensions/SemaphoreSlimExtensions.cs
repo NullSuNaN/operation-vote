@@ -19,7 +19,7 @@ namespace operation_vote.Shared.Extensions
     {
       try
       {
-        @lock.Release();
+         @lock.Release();
         return true;
       }
       catch (SemaphoreFullException)

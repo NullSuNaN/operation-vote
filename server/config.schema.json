@@ -9,11 +9,6 @@
   "properties": {
     "Network": {
       "type": "object",
-      "required": [
-        "TcpHost",
-        "TcpPort",
-        "WsUriPrefix"
-      ],
       "properties": {
         "TcpHost": {
           "type": "string",
