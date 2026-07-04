@@ -45,7 +45,7 @@ namespace operation_vote.Server
       _server.OnClientDisconnected += HandleClientDisconnected;
       _server.OnUserRegistered += (sender, user) =>
       {
-        user.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
+        user.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange;
       };
       _server.OnClientUserChange += (sender, e) =>
       {
@@ -54,8 +54,8 @@ namespace operation_vote.Server
         try
         {
           int multiplierChange = newUser.VoteMultiplier - oldUser.VoteMultiplier;
-          if(multiplierChange != 0)
-            using(managerLock.EnterWriteLockAsToken())
+          if (multiplierChange != 0)
+            using (managerLock.EnterWriteLockAsToken())
               ProcessVoteMultiplierChange(client, multiplierChange);
         }
         finally { }
@@ -64,13 +64,13 @@ namespace operation_vote.Server
       _server.OnUserDeleted += (sender, e) =>
       {
         managerLock.EnterUpgradeableReadLock();
-        e.User.OnVoteMultiplierChange -= HandleUserVoteMultiplierChange;
+        e.User.OnVoteMultiplierChangeLocked -= HandleUserVoteMultiplierChange;
       };
       foreach (var item in server.Users.Values)
       {
-        item.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
+        item.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange;
       }
-      server.UnauthorizedUser.OnVoteMultiplierChange += HandleUserVoteMultiplierChange; // Anonymous is a separate field
+      server.UnauthorizedUser.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange; // Anonymous is a separate field
     }
     private void ProcessVoteMultiplierChange(ClientInfo client, int multiplierChange)
     {
@@ -127,7 +127,7 @@ namespace operation_vote.Server
     public void SignalUnhandledUserChange(ClientInfo client, User oldUser)
     {
       using var _ = managerLock.EnterUpgradeableReadLockAsToken();
-      if(client.User.VoteMultiplier == oldUser.VoteMultiplier) return;
+      if (client.User.VoteMultiplier == oldUser.VoteMultiplier) return;
       int multiplierChange = client.User.VoteMultiplier - oldUser.VoteMultiplier;
       try
       {
@@ -178,7 +178,8 @@ namespace operation_vote.Server
       finally { managerLock.ExitWriteLock(); }
     }
 
-    private void HandleClientDisconnected(object? sender, (ClientInfo Client, string Reason) e)
+    private void HandleClientDisconnected(object? sender, (ClientInfo Client, string Reason) e) =>
+    new Thread( () =>
     {
       managerLock.EnterWriteLock();
       try
@@ -212,7 +213,7 @@ namespace operation_vote.Server
         }
       }
       finally { managerLock.ExitWriteLock(); }
-    }
+    }).Start();
     private void HandleUserVoteMultiplierChange(object? sender, (int Original, int New) e)
     {
       User user = (User?)sender ?? null!;

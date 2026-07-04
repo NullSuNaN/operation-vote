@@ -13,6 +13,11 @@ namespace operation_vote.Interface.Server
   public class UserDatabase : IUserContainer, IDisposable
   {
     private const string ConnectionString = "Data Source=users.db;Pooling=True;";
+    private const string NameProperty = "Name";
+    private const string ApiKeyProperty = "ApiKey";
+    private const string VoteMultiplierProperty = "VoteMultiplier";
+    private const string SessionsLimitProperty = "SessionsLimit";
+
     private readonly object _dbLock = new(); // Ensures serialized execution for SQLite operations
 
     // High-performance ConcurrentDictionary guarantees thread safety across concurrent connection tasks
@@ -21,6 +26,7 @@ namespace operation_vote.Interface.Server
     public User AnonymousUser { get; private set; } = null!;
     public event EventHandler<User>? OnUserRegistered;
     public event EventHandler<User>? OnUserDeleted;
+    private readonly SemaphoreSlim UserEventProcessLock = new(1, 1);
 
     public UserDatabase(EventHandler<User>? OnUserRegistered = null)
     {
@@ -36,28 +42,54 @@ namespace operation_vote.Interface.Server
       connection.Open();
       return connection;
     }
-
     private void InitializeDatabase()
     {
       lock (_dbLock)
       {
         using var connection = CreateOpenConnection();
-        var createTableQuery = @"
-                CREATE TABLE IF NOT EXISTS Users (
-                    Name TEXT PRIMARY KEY,
-                    ApiKey TEXT NOT NULL,
-                    VoteMultiplier INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS SystemSettings (
-                    Key TEXT PRIMARY KEY,
-                    Value TEXT
-                );";
 
-        using var command = new SqliteCommand(createTableQuery, connection);
-        command.ExecuteNonQuery();
+        // 1. Establish core baseline schemas
+        var createTableQuery = @$"
+            CREATE TABLE IF NOT EXISTS Users (
+                {NameProperty} TEXT PRIMARY KEY,
+                {ApiKeyProperty} TEXT NOT NULL,
+                {VoteMultiplierProperty} INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS SystemSettings (
+                Key TEXT PRIMARY KEY,
+                Value TEXT
+            );";
+
+        using (var command = new SqliteCommand(createTableQuery, connection))
+        {
+          command.ExecuteNonQuery();
+        }
+
+        // 2. Safely migrate schema to add SessionsLimit column if it doesn't exist
+        bool hasSessionsLimit = false;
+        using (var checkCmd = new SqliteCommand("PRAGMA table_info(Users);", connection))
+        {
+          using var reader = checkCmd.ExecuteReader();
+          while (reader.Read())
+          {
+            // Index 1 contains the column name in PRAGMA table_info's schema layout
+            string columnName = reader.GetString(1);
+            if (columnName.Equals("SessionsLimit", StringComparison.OrdinalIgnoreCase))
+            {
+              hasSessionsLimit = true;
+              break;
+            }
+          }
+        }
+
+        // 3. Inject the dynamic structural upgrade cleanly
+        if (!hasSessionsLimit)
+        {
+          using var migrateCmd = new SqliteCommand($"ALTER TABLE Users ADD COLUMN {SessionsLimitProperty} INTEGER;", connection);
+          migrateCmd.ExecuteNonQuery();
+        }
       }
     }
-
     private void LoadOrCreateAnonymousUser()
     {
       var apiKey = "42";
@@ -74,42 +106,73 @@ namespace operation_vote.Interface.Server
       lock (_dbLock)
       {
         using var connection = CreateOpenConnection();
-        var selectQuery = "SELECT Name, ApiKey, VoteMultiplier FROM Users;";
+
+        // 1. Fetch all columns to prevent "no such column" errors
+        var selectQuery = "SELECT * FROM Users;";
         using var command = new SqliteCommand(selectQuery, connection);
         using var reader = command.ExecuteReader();
+
+        // 2. Map column names to their runtime ordinal indexes (-1 if missing)
+        int nameIdx = GetColumnIndex(reader, "Name");
+        int apiKeyIdx = GetColumnIndex(reader, ApiKeyProperty);
+        int multiplierIdx = GetColumnIndex(reader, VoteMultiplierProperty);
+        int sessionsLimitIdx = GetColumnIndex(reader, SessionsLimitProperty);
+
         while (reader.Read())
         {
-          var user = new User(reader.GetString(0), reader.GetString(1), reader.GetInt32(2));
+          // 3. Extract values safely using the indexed ordinals
+          string name = nameIdx != -1 ? reader.GetString(nameIdx) : string.Empty;
+          string apiKey = apiKeyIdx != -1 ? reader.GetString(apiKeyIdx) : string.Empty;
+          int voteMultiplier = multiplierIdx != -1 ? reader.GetInt32(multiplierIdx) : 1; // Default multiplier to 1
+
+          // Safe fallback to null if column doesn't exist OR value is DBNull
+          int? sessionsLimit = (sessionsLimitIdx != -1 && !reader.IsDBNull(sessionsLimitIdx))
+              ? reader.GetInt32(sessionsLimitIdx)
+              : null;
+
+          var user = new User(name, apiKey, voteMultiplier, sessionsLimit);
+
           RegisterUserMonitor(user);
           _cache[user.Name] = user;
           OnUserRegistered?.Invoke(this, user);
         }
       }
+
     }
 
-    private void HandleUserPropertyChange<T>(object? sender, (T Original, T New) e)
+    private void HandleUserPropertyChange<T>(object? sender, (T Original, T New) e, string propertyName)
     {
       if (sender is User user && TryGetValue(user.Name, out var cachedUser) && ReferenceEquals(user, cachedUser))
       {
-        SqlUpsert(user);
+        UserEventProcessLock.Wait();
+        new Thread(() =>
+        {
+          SqlUpsert(e.New, propertyName, user.Name);
+          UserEventProcessLock.Release();
+        }).Start();
       }
     }
+    private void HandleUserApiKeyChange<T>(object? sender, (T Original, T New) e) => HandleUserPropertyChange(sender, e, ApiKeyProperty);
+    private void HandleUserVoteMultiplierChange<T>(object? sender, (T Original, T New) e) => HandleUserPropertyChange(sender, e, VoteMultiplierProperty);
+    private void HandleUserSessionsLimitChange<T>(object? sender, (T Original, T New) e) => HandleUserPropertyChange(sender, e, SessionsLimitProperty);
 
     private void RegisterUserMonitor(User user)
     {
-      user.OnApiKeyChange += HandleUserPropertyChange;
-      user.OnVoteMultiplierChange += HandleUserPropertyChange;
+      user.OnApiKeyChangeLocked += HandleUserApiKeyChange;
+      user.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange;
+      user.OnSessionsLimitChangeLocked += HandleUserSessionsLimitChange;
     }
 
     private void UnregisterUserMonitor(User user)
     {
-      user.OnApiKeyChange -= HandleUserPropertyChange;
-      user.OnVoteMultiplierChange -= HandleUserPropertyChange;
+      user.OnApiKeyChangeLocked -= HandleUserApiKeyChange;
+      user.OnVoteMultiplierChangeLocked -= HandleUserVoteMultiplierChange;
+      user.OnSessionsLimitChangeLocked -= HandleUserSessionsLimitChange;
     }
 
     public void UpdateAnonymousUser(int voteMultiplier)
     {
-      AnonymousUser.Set("42", voteMultiplier);
+      AnonymousUser.Set("42", voteMultiplier, null);
       SaveSetting("AnonymousVoteMultiplier", voteMultiplier.ToString());
     }
 
@@ -141,23 +204,52 @@ namespace operation_vote.Interface.Server
         command.ExecuteNonQuery();
       }
     }
+    private void SqlUpsert<T>(T newValue, string property, string name)
+    {
+      lock (_dbLock)
+      {
+        using var connection = CreateOpenConnection();
 
+        // 1. Construct the query using the dynamic column name safely.
+        // Parameters cannot be used for column names themselves, so we interpolate 'property'.
+        var updateQuery = $@"
+            UPDATE Users 
+            SET {property} = $newValue 
+            WHERE {NameProperty} = $name;";
+
+        using var command = new SqliteCommand(updateQuery, connection);
+
+        // 2. Bind values using parameterized queries to protect against SQL Injection.
+        command.Parameters.AddWithValue("$newValue", newValue ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$name", name);
+
+        // 3. Execute and check if any record was actually modified
+        int rowsAffected = command.ExecuteNonQuery();
+
+        if (rowsAffected == 0)
+        {
+          throw new KeyNotFoundException($"Database update failed: User '{name}' does not exist in the database.");
+        }
+      }
+    }
     private void SqlUpsert(User user)
     {
       lock (_dbLock)
       {
         using var connection = CreateOpenConnection();
-        var insertQuery = @"
-                INSERT INTO Users (Name, ApiKey, VoteMultiplier) 
-                VALUES ($name, $apiKey, $voteMultiplier)
+        var insertQuery = @$"
+                INSERT INTO Users ({NameProperty}, {ApiKeyProperty}, {VoteMultiplierProperty}, {SessionsLimitProperty}) 
+                VALUES ($name, $apiKey, $voteMultiplier, $sessionsLimit)
                 ON CONFLICT(Name) DO UPDATE SET 
-                    ApiKey = EXCLUDED.ApiKey, 
-                    VoteMultiplier = EXCLUDED.VoteMultiplier;";
+                    {ApiKeyProperty} = EXCLUDED.{ApiKeyProperty}, 
+                    {VoteMultiplierProperty} = EXCLUDED.{VoteMultiplierProperty};
+                    {SessionsLimitProperty} = EXCLUDED.{SessionsLimitProperty}";
 
         using var command = new SqliteCommand(insertQuery, connection);
         command.Parameters.AddWithValue("$name", user.Name);
         command.Parameters.AddWithValue("$apiKey", user.ApiKey);
         command.Parameters.AddWithValue("$voteMultiplier", user.VoteMultiplier);
+        command.Parameters.AddWithValue("$sessionsLimit", user.SessionsLimit);
         command.ExecuteNonQuery();
       }
     }
@@ -171,6 +263,18 @@ namespace operation_vote.Interface.Server
         using var command = new SqliteCommand(deleteQuery, connection);
         command.Parameters.AddWithValue("$name", username);
         return command.ExecuteNonQuery() > 0;
+      }
+    }
+
+    private static int GetColumnIndex(SqliteDataReader reader, string columnName)
+    {
+      try
+      {
+        return reader.GetOrdinal(columnName);
+      }
+      catch (ArgumentOutOfRangeException)
+      {
+        return -1; // Column missing in older database versions
       }
     }
 
@@ -194,16 +298,16 @@ namespace operation_vote.Interface.Server
           newValue =>
           {
             RegisterUserMonitor(value);
-            newUser=true;
+            newUser = true;
             return value;
           },
           (keyStr, existingUser) =>
           {
             // Mutate the properties on the original live reference
-            existingUser.Set(value.ApiKey, value.VoteMultiplier);
+            existingUser.Set(value.ApiKey, value.VoteMultiplier, value.SessionsLimit);
             return existingUser;
           });
-        if(newUser)
+        if (newUser)
           OnUserRegistered?.Invoke(this, actualTrackedUser);
       }
     }
@@ -415,7 +519,7 @@ namespace operation_vote.Interface.Server
 
         foreach (KeyValuePair<string, User> kvp in db)
         {
-          Console.WriteLine($"Username: \"{kvp.Value.Name}\", ApiKey: \"{kvp.Value.ApiKey}\", Multiplier: {kvp.Value.VoteMultiplier}, Connections: {kvp.Value.ConnectedClients.Count}");
+          Console.WriteLine($"Username: \"{kvp.Value.Name}\", ApiKey: \"{kvp.Value.ApiKey}\", Multiplier: {kvp.Value.VoteMultiplier}, SessionsLimit: {kvp.Value.SessionsLimit?.ToString() ?? "null"}, Connections: {kvp.Value.ConnectedClients.Count}");
         }
       }
 
@@ -423,7 +527,7 @@ namespace operation_vote.Interface.Server
       {
         Console.WriteLine("--- Anonymous User Configuration ---");
         var anon = db.AnonymousUser;
-        Console.WriteLine($"Username: \"{anon.Name}\", ApiKey: \"{anon.ApiKey}\", Multiplier: {anon.VoteMultiplier}");
+        Console.WriteLine($"Multiplier: {anon.VoteMultiplier}");
       }
 
       private static void AddNewUser(UserDatabase db)
@@ -440,15 +544,18 @@ namespace operation_vote.Interface.Server
         }
 
         Console.Write("Enter ApiKey (Password): ");
-        string apiKey = GetInput(out bool keyValid, "ApiKey");
+        string apiKey = GetInput(out bool keyValid, ApiKeyProperty);
         if (!keyValid) return;
 
         Console.Write("Enter VoteMultiplier (default 1): ");
         if (!int.TryParse(Console.ReadLine(), out int multiplier)) multiplier = 1;
 
+        Console.Write("Enter SessionsLimit (default null): ");
+        if (!int.TryParse(Console.ReadLine(), out int sessionsLimit)) sessionsLimit = 1;
+
         try
         {
-          db.Add(username, new User(Name: username, ApiKey: apiKey, VoteMultiplier: multiplier));
+          db.Add(username, new User(Name: username, ApiKey: apiKey, VoteMultiplier: multiplier, SessionsLimit: sessionsLimit));
           Console.WriteLine($"Success: Account initialized for '{username}'.");
         }
         catch (Exception ex)
@@ -469,53 +576,52 @@ namespace operation_vote.Interface.Server
           Console.WriteLine($"Error: User '{username}' was not found in database registry.");
           return;
         }
-
-        Console.WriteLine("\nSelect attribute parameter to mutate:");
-        Console.WriteLine("1. Modify ApiKey exclusively");
-        Console.WriteLine("2. Modify VoteMultiplier exclusively");
-        Console.WriteLine("3. Modify both properties concurrently");
-        Console.Write("Choice: ");
-        string choice = Console.ReadLine() ?? "";
-
         string targetApiKey = user.ApiKey;
         int targetMultiplier = user.VoteMultiplier;
+        int? targetSessionsLimit = user.SessionsLimit;
 
-        switch (choice.Trim())
+        Console.Write("Update ApiKey(Y/N)?");
+        if (string.Equals(Console.ReadLine()?.Trim(), "Y", StringComparison.OrdinalIgnoreCase))
         {
-          case "1":
-            Console.Write("Enter New ApiKey: ");
-            targetApiKey = GetInput(out bool keyOk, "ApiKey");
-            if (!keyOk) return;
-            break;
-
-          case "2":
-            Console.Write("Enter New VoteMultiplier: ");
-            if (!int.TryParse(Console.ReadLine(), out targetMultiplier))
-            {
-              Console.WriteLine("Invalid entry. Multiplier fallback to default.");
-              return;
-            }
-            break;
-
-          case "3":
-            Console.Write("Enter New ApiKey: ");
-            targetApiKey = GetInput(out bool aggregateKeyOk, "ApiKey");
-            if (!aggregateKeyOk) return;
-
-            Console.Write("Enter New VoteMultiplier: ");
-            if (!int.TryParse(Console.ReadLine(), out targetMultiplier)) return;
-            break;
-
-          default:
-            Console.WriteLine("Invalid selection. Aborting execution routine.");
-            return;
+          Console.Write("Enter New ApiKey: ");
+          var _targetApiKey = GetInput(out bool keyOk, ApiKeyProperty);
+          if (!keyOk)
+            Console.WriteLine("Invalid ApiKey, if you want to use it, enable strict mode");
+          else
+            targetApiKey = _targetApiKey;
         }
+
+        Console.Write("Enter New VoteMultiplier, use s to skip: ");
+        if (int.TryParse(Console.ReadLine(), out var _targetMultiplier))
+        {
+          targetMultiplier = _targetMultiplier;
+          Console.WriteLine($"VoteMultiplier set to {targetMultiplier}.");
+        }
+        else
+          Console.WriteLine($"VoteMultiplier is still {targetMultiplier}.");
+
+        Console.Write("Enter New SessionsLimit, use s to skip, null to disable: ");
+        string? sessionsLimitStr = Console.ReadLine();
+        if (int.TryParse(sessionsLimitStr, out var _targetSessionsLimit))
+        {
+          targetSessionsLimit = _targetSessionsLimit;
+          Console.WriteLine($"SessionsLimit set to {targetSessionsLimit?.ToString() ?? "null"}.");
+        }
+        else if (sessionsLimitStr == "null")
+        {
+          targetSessionsLimit = null;
+          Console.WriteLine($"SessionsLimit set to null.");
+        }
+        else
+          Console.WriteLine($"SessionsLimit is still {targetSessionsLimit?.ToString() ?? "null"}.");
 
         try
         {
           // Atomically apply parameters to existing live reference safely via the indexer update flow
           if (db.TryGetValue(username, out User? modifiedUser))
-            modifiedUser.Set(ApiKey: targetApiKey, VoteMultiplier: targetMultiplier);
+          {
+            modifiedUser.Set(ApiKey: targetApiKey, VoteMultiplier: targetMultiplier, SessionsLimit: targetSessionsLimit);
+          }
           Console.WriteLine($"Success: User parameters updated for '{username}'.");
         }
         catch (Exception ex)
@@ -537,6 +643,7 @@ namespace operation_vote.Interface.Server
           Console.WriteLine($" -> Username:       \"{user.Name}\"");
           Console.WriteLine($" -> ApiKey:         \"{user.ApiKey}\"");
           Console.WriteLine($" -> VoteMultiplier: {user.VoteMultiplier}");
+          Console.WriteLine($" -> SessionsLimit:  {user.SessionsLimit?.ToString() ?? "null"}");
           Console.WriteLine($" -> Active Handles: {user.ConnectedClients.Count} instances connected.");
         }
         else
@@ -590,7 +697,7 @@ namespace operation_vote.Interface.Server
             foreach (var client in activeClients)
             {
               Task<User>? currentTask = server?.ExchangeUser(client, db.AnonymousUser);
-              if(currentTask != null)
+              if (currentTask != null)
                 ExchangeUserTasks.Add(currentTask);
             }
             Task.WaitAll(ExchangeUserTasks);

@@ -118,10 +118,10 @@ namespace operation_vote.Interface.ClientWindow
         ClientManager = ClientManager<T>.LaunchClientManager(_client);
 
         Console.WriteLine($"Connecting to network node at {uri}...");
-        _client.OnAuthorizationFinished += (sender, success) =>
+        _client.OnAuthorizationFinished += (sender, e) =>
         {
-          if(!success)
-            Console.WriteLine("Failed to login, continuing as Anonymous.");
+          if(!e.success)
+            Console.WriteLine($"Failed to login, continuing as Anonymous: {e.reason}");
         };
         _client.OnUserChanged += (sender, user) =>
         {

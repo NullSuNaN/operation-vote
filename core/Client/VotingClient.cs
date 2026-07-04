@@ -4,6 +4,7 @@ using System.Net;
 using System.Text;
 using operation_vote.Client.Request;
 using operation_vote.Shared;
+using operation_vote.Shared.Extensions;
 
 namespace operation_vote.Client
 {
@@ -23,7 +24,7 @@ namespace operation_vote.Client
 		public bool Disconnected => Volatile.Read(ref _isDisposedState) == 1;
 
 		// Tracks the multi-step initialization handshake frame asynchronously
-		private TaskCompletionSource<bool>? _handshakeCompletionSource;
+		private TaskCompletionSource<object?>? _handshakeCompletionSource;
 
 		public string TargetURI
 		{
@@ -51,7 +52,7 @@ namespace operation_vote.Client
 
 		public event EventHandler<(T, string)>? OnDisconnect;
 		public event EventHandler? OnConnectionFinished;
-		public event EventHandler<bool>? OnAuthorizationFinished;
+		public event EventHandler<(bool success, string reason)>? OnAuthorizationFinished;
 		private int voteMultiplierCache = ProtocolInfo.ClientDefaultVoteMultiplier;
 		public int VoteMultiplier => Volatile.Read(ref voteMultiplierCache);
 		private volatile string? user = null;
@@ -75,7 +76,7 @@ namespace operation_vote.Client
 		/// </summary>
 		public event EventHandler<string?>? OnUserChanged;
 		private TaskCompletionSource<string> AuthenticationFetchToken = new(TaskCreationOptions.RunContinuationsAsynchronously);
-		private TaskCompletionSource<bool> AuthenticationResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		private TaskCompletionSource<(bool success, string reason)> AuthenticationResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
 		public VotingClient(T socketRequestHandler, string uri, CancellationToken token = default)
 		{
@@ -96,7 +97,7 @@ namespace operation_vote.Client
 			{
 				if (Disconnected) return;
 
-				_handshakeCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+				_handshakeCompletionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
 				string cleanUri;
 				lock (_uriLock) { cleanUri = _targetURI.TrimStart('+'); }
@@ -118,21 +119,29 @@ namespace operation_vote.Client
 				}
 
 				// Wait for the server data arrival to execute version checks
-				bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
-				if (!initialized)
+				bool initialized = false;
+				try
 				{
-					await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
-					OnDisconnect?.Invoke(this, (SocketRequestHandler, "Failed to initialize the connection."));
-					Dispose();
+					await _handshakeCompletionSource.Task.ConfigureAwait(false);
+					initialized = true;
+				}
+				finally
+				{
+					if (!initialized)
+					{
+						await SocketRequestHandler.DisconnectAsync(CancellationToken).ConfigureAwait(false);
+						OnDisconnect?.Invoke(this, (SocketRequestHandler, "Failed to initialize the connection."));
+						Dispose();
+					}
 				}
 
 				// Authorize if the client is logged in
 				var _authenticationData = Volatile.Read(ref authenticationData);
 				if (_authenticationData != null)
 				{
-					AuthenticationFetchToken = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-					AuthenticationResult = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-					bool authSuccess = await AuthenticationClient.AuthenticateAsync(
+					AuthenticationFetchToken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+					AuthenticationResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
+					var (authSuccess, authReason) = await AuthenticationClient.AuthenticateAsync(
 						Volatile.Read(ref _authenticationData),
 						async data =>
 						{
@@ -162,7 +171,7 @@ namespace operation_vote.Client
 						user = _authenticationData.Username;
 						OnUserChanged?.Invoke(this, _authenticationData.Username);
 					}
-					OnAuthorizationFinished?.Invoke(this, authSuccess);
+					OnAuthorizationFinished?.Invoke(this, (authSuccess, authReason));
 				}
 				{ // Establish Voting
 					using var ms = new MemoryStream();
@@ -173,14 +182,14 @@ namespace operation_vote.Client
 				}
 				OnConnectionFinished?.Invoke(this, EventArgs.Empty);
 			}
-			catch
+			catch(Exception ex)
 			{
-				_handshakeCompletionSource?.TrySetResult(false);
+				_handshakeCompletionSource?.TrySetException([ex]);
 				throw;
 			}
 			finally
 			{
-				_connectionLock.Release();
+				try {	_connectionLock.Release(); } catch {}
 			}
 		}
 
@@ -241,7 +250,7 @@ namespace operation_vote.Client
 
 							await SocketRequestHandler.ConnectAsync(cleanUri, CancellationToken).ConfigureAwait(false);
 
-							_handshakeCompletionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+							_handshakeCompletionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
 							// Start inbound listener processing pathway
 							_ = Task.Run(() => SocketRequestHandler.StartListeningAsync(CancellationToken), CancellationToken);
@@ -256,8 +265,11 @@ namespace operation_vote.Client
 							}
 
 							// Wait for the server data arrival to execute version checks
-							bool initialized = await _handshakeCompletionSource.Task.ConfigureAwait(false);
-							if (!initialized)
+							try
+							{
+								await _handshakeCompletionSource.Task.ConfigureAwait(false);
+							}
+							catch
 							{
 								_operationTypes.Clear();
 								throw new InvalidOperationException("Failed to reconnect.");
@@ -266,9 +278,9 @@ namespace operation_vote.Client
 							var _authenticationData = Volatile.Read(ref authenticationData);
 							if (_authenticationData != null)
 							{
-								AuthenticationFetchToken = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-								AuthenticationResult = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-								bool authSuccess = await AuthenticationClient.AuthenticateAsync(
+								AuthenticationFetchToken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+								AuthenticationResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
+								var (authSuccess, authReason) = await AuthenticationClient.AuthenticateAsync(
 									Volatile.Read(ref _authenticationData),
 									async data =>
 									{
@@ -304,7 +316,7 @@ namespace operation_vote.Client
 								}
 								if (user != originalUser)
 									OnUserChanged?.Invoke(this, _authenticationData.Username);
-								OnAuthorizationFinished?.Invoke(this, authSuccess);
+								OnAuthorizationFinished?.Invoke(this, (authSuccess, authReason));
 							}
 							{ // 3. Re-send Handshake registration
 								using var ms = new MemoryStream();
@@ -360,7 +372,7 @@ namespace operation_vote.Client
 						string versionString = reader.ReadString();
 						if (versionString != $"VOTE-{ProtocolInfo.Version}")
 						{
-							_handshakeCompletionSource?.TrySetResult(false);
+							_handshakeCompletionSource?.TrySetException([new ProtocolViolationException($"Protocol mismatch: client VOTE-{ProtocolInfo.Version}, server {versionString}")]);
 							return;
 						}
 
@@ -376,7 +388,7 @@ namespace operation_vote.Client
 							_operationTypes[typeId] = opType;
 						}
 
-						_handshakeCompletionSource?.TrySetResult(true);
+						_handshakeCompletionSource?.TrySetResult(null);
 					}
 					catch
 					{
@@ -391,7 +403,7 @@ namespace operation_vote.Client
 					AuthenticationFetchToken.TrySetResult(reader.ReadString());
 					break;
 				case ProtocolInfo.ServerCommands.AuthenticateResultCommand:
-					AuthenticationResult.TrySetResult(reader.ReadBoolean());
+					AuthenticationResult.TrySetResult((reader.ReadBoolean(), reader.ReadString()));
 					break;
 				case ProtocolInfo.ServerCommands.UpdateStatusCommand:
 					string stat = reader.ReadString();

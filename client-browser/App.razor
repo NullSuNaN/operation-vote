@@ -21,7 +21,7 @@
       <p>Specify the target infrastructure address below:</p>
 
       <div class="form-group">
-        <input type="text" @bind="ServerUri" class="input-field" placeholder="ws://127.0.0.1:11169/"
+        <input type="text" @oninput="e => {ServerUri = (string?)e.Value ?? string.Empty;UpdateInputField();}" value="@ServerUri" class="input-field" placeholder="ws://127.0.0.1:11169/"
                @onkeypress="HandleConnectKeyPairSubmit" @oninput="UpdateInputField" disabled="@_isConnecting" />
         @if (navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
@@ -194,13 +194,13 @@ else
         _client.OnDisconnect += HandleClientDisconnect;
         TaskCompletionSource<string?> authCs = new();
 
-        _client.OnAuthorizationFinished += (object? sender, bool success) =>
+        _client.OnAuthorizationFinished += (sender, e) =>
         {
-          if (!success)
+          if (!e.success)
           {
             var client = (VotingClient<SocketRequestHandler>?)sender;
             var username = client?.authenticationData?.Username;
-            var message = username == null ? "Failed to authorize to the operation server." : $"Failed to authorize to the operation server as {username}.";
+            var message = username == null ? "Failed to authorize to the operation server." : $"Failed to authorize to the operation server as {username}: {e.reason}.";
             authCs.SetResult(message);
           }
           else
@@ -417,7 +417,13 @@ else
         HidePassword = false;
       }
     if(!string.IsNullOrEmpty(Username))
+    {
       UseAnonymous = false;
+      Task.Run(async () =>{
+        await UpdateInputField();
+        StateHasChanged();
+      });
+    }
   }
 
   public void Dispose()

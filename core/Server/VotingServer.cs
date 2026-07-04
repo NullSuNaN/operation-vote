@@ -46,9 +46,9 @@ namespace operation_vote.Server
       Users.OnUserDeleted += HandleUserDeleted;
       foreach (var user in Users)
       {
-        user.Value.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
+        user.Value.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange;
       }
-      UnauthorizedUser.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
+      UnauthorizedUser.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange;
       // Users.OnUserDeleted;
 
       // Establish standard baseline operation templates matching workspace profiles
@@ -141,7 +141,7 @@ namespace operation_vote.Server
           case ProtocolInfo.ClientCommands.AuthenticateRequestCommand: // client requests authentication
             User? user = null; // cache the user got from AuthenticateClientAsync
             string requestedUsername = "";
-            string? username = await AuthenticationServer.AuthenticateClientAsync(async data =>
+            string? username = await AuthenticationServer.AuthenticateClientAsync(Users, clientInfo, async data =>
               {
                 using var ms = new MemoryStream();
                 using var writer = new BinaryWriter(ms, Encoding.UTF8);
@@ -150,25 +150,23 @@ namespace operation_vote.Server
                 writer.Flush();
                 await clientInfo.Channel.SendToClientAsync(clientInfo, ms.ToArray());
                 return await clientInfo.UserAuthenticationResult.Task;
-              }, async username =>
+              }, async (username, targetUser) =>
               {
                 requestedUsername = username;
-                Users.TryGetValue(username, out user);
-
-                return user?.ApiKey;
-              }, async success =>
+                user = targetUser;
+              }, async (success, message) =>
               {
                 using var ms = new MemoryStream();
                 using var writer = new BinaryWriter(ms, Encoding.UTF8);
                 writer.Write(ProtocolInfo.ServerCommands.AuthenticateResultCommand);
                 writer.Write(success);
+                writer.Write(message);
                 writer.Flush();
                 await clientInfo.Channel.SendToClientAsync(clientInfo, ms.ToArray());
               }
             );
             if (user != null)
             {
-              clientInfo.User = user;
               int userMultiplier = user.VoteMultiplier;
               if (userMultiplier != ProtocolInfo.ClientDefaultVoteMultiplier)
                 using (var ms = new MemoryStream())
@@ -223,7 +221,7 @@ namespace operation_vote.Server
     }
 
     private void HandleUserVoteMultiplierChange(object? sender, (int Original, int New) e)
-      => _ = SendMultiplierUpdateAsync((User?)sender!);
+      => new Thread(()=>SendMultiplierUpdateAsync((User?)sender!).GetAwaiter().GetResult()).Start();
     private async Task SendMultiplierUpdateAsync(User user)
     {
       Console.WriteLine($"The multiplier of user {user.Name} is set to {user.VoteMultiplier}.");
@@ -256,7 +254,7 @@ namespace operation_vote.Server
     }
     private async void HandleUserDeleted(object? _, User user)
     {
-      user.OnVoteMultiplierChange -= HandleUserVoteMultiplierChange;
+      user.OnVoteMultiplierChangeLocked -= HandleUserVoteMultiplierChange;
       IEnumerable<ClientInfo> clients;
       using (user.ConnectedClientsLock.EnterWriteLockAsToken())
         clients = user.ConnectedClients.Select(client =>
@@ -305,7 +303,7 @@ namespace operation_vote.Server
     private async void HandleUserRegistered(object? _, User user)
     {
       Console.WriteLine($"User {user.Name} is registered.");
-      user.OnVoteMultiplierChange += HandleUserVoteMultiplierChange;
+      user.OnVoteMultiplierChangeLocked += HandleUserVoteMultiplierChange;
       OnUserRegistered?.Invoke(this, user);
     }
 

@@ -15,7 +15,7 @@ namespace operation_vote.Server
     /// <param name="sendResult">Delegate responsible for sending the result back to the client</param>
     /// <returns>The verified username if successful; null if authentication fails.</returns>
     /// <exception cref="ProtocolViolationException">Thrown when the response payload is structurally malformed or corrupted.</exception>
-    public static async Task<string?> AuthenticateClientAsync(Func<string, Task<byte[]>> sendRequest, Func<string, Task<string?>> fetchApiKey, Func<bool, Task> sendResult)
+    public static async Task<string?> AuthenticateClientAsync(IUserContainer users, ClientInfo client, Func<string, Task<byte[]>> sendRequest, Func<string, User?, Task> onUserReceived, Func<bool, string, Task> sendResult)
     {
       // 1. Generate a cryptographically secure random token string (Base64 encoded)
       byte[] tokenBytes = new byte[32];
@@ -49,12 +49,14 @@ namespace operation_vote.Server
         throw new ProtocolViolationException("Failed to parse authentication response payload. Malformed stream framework.");
       }
 
-      // 4. Verification Step: Look up the user's expected API Key
+      // 4. Verification Step: Look up the user's expected API Key      
+      users.TryGetValue(username, out var user);
+      await onUserReceived(username, user).ConfigureAwait(false);
 
-      string? expectedApiKey = await fetchApiKey(username).ConfigureAwait(false);
-      if (expectedApiKey == null)
+      string? expectedApiKey = user?.ApiKey;
+      if (expectedApiKey == null || user == null)
       {
-        await sendResult(false).ConfigureAwait(false);
+        await sendResult(false, "User does not exist.").ConfigureAwait(false);
         return null; // User doesn't exist
       }
 
@@ -62,6 +64,7 @@ namespace operation_vote.Server
       string expectedSignature = ComputeHmacSignature(serverToken, expectedApiKey);
 
       bool success=false;
+      string reason = "Unknown Exception.";
       try
       {
         // Constant-time comparison to prevent timing attacks
@@ -69,15 +72,31 @@ namespace operation_vote.Server
           Encoding.UTF8.GetBytes(expectedSignature),
           Encoding.UTF8.GetBytes(clientSignature)))
         {
-          success=true;
-          return username; // Authentication successful
+          if(user.TryAddClient(client))
+          {
+            success=true;
+            reason = "Success.";
+            return username; // Authentication successful
+          }
+          else
+          {
+            reason = "Sessions limit exceed.";
+          }
         }
+        else
+          reason = "Password is incorrect.";
 
         return null; // Signature mismatch
       }
+      catch(Exception e)
+      {
+        reason = $"Unknown Exception: {e.GetType().Name}";
+        reason = $"Unknown Exception: {e.Message}";
+        throw;
+      }
       finally
       {
-        await sendResult(success).ConfigureAwait(false);
+        await sendResult(success, reason).ConfigureAwait(false);
       }
     }
 

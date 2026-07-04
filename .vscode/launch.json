@@ -15,7 +15,7 @@
       "preLaunchTask": "dotnet: build client-window.csproj",
       "program": "${workspaceFolder}/client-window/bin/Debug/net10.0/client-window.dll",
       "args": [
-        "172.17.80.1:11167",
+        "localhost:11167",
         "tcp",
         "test",
         "pass"

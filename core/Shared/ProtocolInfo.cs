@@ -2,7 +2,7 @@ namespace operation_vote.Shared
 {
   public static class ProtocolInfo
   {
-    public const string Version = "2.0";
+    public const string Version = "2.3";
     public const int ClientDefaultVoteMultiplier = 1;
     public static class ClientCommands
     {
