@@ -22,7 +22,7 @@
 
       <div class="form-group">
         <input type="text" @oninput="e => {ServerUri = (string?)e.Value ?? string.Empty;UpdateInputField();}" value="@ServerUri" class="input-field" placeholder="ws://127.0.0.1:11169/"
-               @onkeypress="HandleConnectKeyPairSubmit" @oninput="UpdateInputField" disabled="@_isConnecting" />
+               @onkeypress="HandleConnectKeyPairSubmit" disabled="@_isConnecting" />
         @if (navigationManager.BaseUri.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {
           <small>Connecting to ws://(instead of wss://) servers in this https:// page may fail and silently crash the app.</small>

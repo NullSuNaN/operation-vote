@@ -56,14 +56,15 @@ listArr() {
   done
 }
 
-trap 'kill -SIGINT %_ 2>/dev/null' SIGINT
+trap 'kill -SIGINT %_ 2>/dev/null;failed=1' SIGINT
 trap 'kill -SIGINT %_ 2>/dev/null' EXIT
 tgList=()
 for system in win-x86 win-x64 linux-arm linux-x64; do
-  for proj_type in server client-window client-browser; do
+  for proj_type in server client-window; do
     tgList[${#tgList[@]}]="$proj_type-$system"
   done
 done
+tgList[${#tgList[@]}]="client-browser"
 readarray -t _tgList < <(grep --color=never -E "$filter" - < <(listArr "${tgList[@]}"))
 echo "Building: ${_tgList[@]}"
 declare -A tgDict
@@ -130,42 +131,38 @@ for system in win-x86 win-x64 linux-arm linux-x64; do
     echo -n " " >&4
     echo -n ' ' >&3
   } &
-  [ "${tgDict["client-browser-$system"]}" == 1 ] && { # client-browser
-    trap 'echo -n " " >&3;exit 130' SIGINT
-    read -r -N 1 <&3
-    read -r -N 1 <&6
-    proj_type=client-browser
-    dict_proj="$dict/$proj_type-$system"
-    echo "Building $proj_type-$system"
-    output="$(
-      {
-        echo "Building Done: $proj_type-$system"
-        mkdir -p "$dict_proj/wwwroot"
-        trap 'rm -rf "./$dict_proj";echo -n " " >&3;exit 130' SIGINT
-        dotnet publish "$proj_type/" -c Release -o "$dict_proj/app" -p:Version="$ver" || err "$proj_type-$system: Failed to build $proj_type-$system"$'\n'
-        cp -r "$proj_type/wwwroot" "$dict_proj/"
-        [ "${system%%-*}" == win ] && {
-          echo $'@echo off\ndotnet serve -d:app\wwwroot %*' > "$dict_proj/$proj_type.bat"
-          echo "Use $proj_type.bat -p:PORT -a ADDRESS to serve. It requires dotnet serve(dotnet tool install --global dotnet-serve)" > "$dict_proj/README.txt"
-        }
-        [ "${system%%-*}" == linux ] && {
-          echo 'dotnet serve -d:app/wwwroot "$@"' > "$dict_proj/$proj_type"
-          chmod +x "$dict_proj/$proj_type"
-          echo "Use $proj_type -p:PORT -a ADDRESS to serve. It requires dotnet serve(dotnet tool install --global dotnet-serve)" > "$dict_proj/README.txt"
-        }
-        trap 'echo -n " " >&3' SIGINT
-        cd "$dict"
-        zip "$proj_type-$system.zip" -q9r "$proj_type-$system/"
-        # rm -rf "./$proj_type-$system"
-      } 2>&1
-    )"
-    echo -n " " >&6
-    read -r -N 1 <&4
-    echo "$output"
-    echo -n " " >&4
-    echo -n ' ' >&3
-  } &
 done
+[ "${tgDict["client-browser"]}" == 1 ] && { # client-browser
+  trap 'echo -n " " >&3;exit 130' SIGINT
+  read -r -N 1 <&3
+  read -r -N 1 <&6
+  proj_type=client-browser
+  dict_proj="$dict/$proj_type"
+  echo "Building $proj_type"
+  output="$(
+    {
+      echo "Building Done: $proj_type"
+      mkdir -p "$dict_proj/wwwroot"
+      trap 'rm -rf "./$dict_proj";echo -n " " >&3;exit 130' SIGINT
+      dotnet publish "$proj_type/" -c Release -o "$dict_proj/app" -p:Version="$ver" || err "$proj_type: Failed to build $proj_type"$'\n'
+      cp -r "$proj_type/wwwroot" "$dict_proj/"
+      echo $'@echo off\ndotnet serve -d:app\wwwroot %*' > "$dict_proj/$proj_type.bat"
+      echo "Use $proj_type.bat -p:PORT -a ADDRESS to serve. It requires dotnet serve(dotnet tool install --global dotnet-serve)" > "$dict_proj/README.txt"
+      echo 'dotnet serve -d:app/wwwroot "$@"' > "$dict_proj/$proj_type"
+      chmod +x "$dict_proj/$proj_type"
+      echo "Use $proj_type -p:PORT -a ADDRESS to serve. It requires dotnet serve(dotnet tool install --global dotnet-serve)" > "$dict_proj/README.txt"
+      trap 'echo -n " " >&3' SIGINT
+      cd "$dict"
+      zip "$proj_type.zip" -q9r "$proj_type/"
+      # rm -rf "./$proj_type"
+    } 2>&1
+  )"
+  echo -n " " >&6
+  read -r -N 1 <&4
+  echo "$output"
+  echo -n " " >&4
+  echo -n ' ' >&3
+} &
 failed=0
 failedTasks=()
 while true;do
